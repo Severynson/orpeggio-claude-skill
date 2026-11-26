@@ -19,6 +19,10 @@ $ARP export-text $W/arrangement.json --measures 1-8 --no-positions   # read, the
 $ARP patch-arrangement $W/arrangement.json $W/verse.atf
 $ARP optimize-tablature $W/arrangement.json
 $ARP validate-arrangement $W/arrangement.json
+$ARP detect-expression song.mp3 $W/notes.json                    # optional: real vibrato/bends
+$ARP suggest-techniques $W/arrangement.json --expression $W/expression.json \
+     --score $W/score.json --bar-offset 0          # review, then re-run with --apply safe
+$ARP validate-arrangement $W/arrangement.json
 $ARP render-tab $W/arrangement.json --measures 1-8
 $ARP export $W/arrangement.json --format gp5,pdf,musicxml,midi,ascii
 ```

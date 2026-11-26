@@ -59,7 +59,14 @@ Symbols: `C Cm C7 Cmaj7 Cm7 Cdim Caug Csus2 Csus4 C6 Cm6 C9 Cadd9 Cm7b5 Cdim7 C/
 - `string`: 1 = highest (high e). `fret` is relative to the capo.
 - `tuning`: name (`standard`, `drop_d`, `dadgad`, `open_g`, …) or list low→high
   (`["D2","A2","D3","G3","B3","E4"]`).
-- `technique`: `h`, `p`, `slide`, `harmonic`, `let_ring`, `vibrato`.
+- `technique`: one or more tokens joined by `+` (e.g. `h+vibrato`), describing how
+  *this* note is produced: `vibrato`, `wide_vibrato`, `late_vibrato` (straight
+  attack, wobble only after the last fretted note struck under it), `bend` (whole tone),
+  `bend_half`, `bend_release`, `h` / `p` (hammer-on / pull-off **from the previous
+  note on the same string**), `slide` (legato slide from the previous note on the
+  same string), `slide_in`, `slide_out`, `harmonic`, `let_ring`, `palm_mute`,
+  `staccato`, `ghost`, `accent`. Exporters move h/p/slide marks onto the origin
+  note where Guitar Pro / MusicXML expect them.
 
 ## ATF — Arpeggio Text Format (compact arrangement text)
 
@@ -96,7 +103,7 @@ M 1 Am | F@2
   - duration in quarters: `4` whole, `2` half, `1` quarter, `.5` eighth,
     `.25` sixteenth, `1.5` dotted quarter, `.333` eighth-triplet.
   - flags: `lock` (optimizer keeps the given position), `tie`, `v1`/`v2`,
-    `tech=…`, `f=p|i|m|a` (right-hand finger).
+    `tech=…` (combine with `+`: `tech=h+vibrato`), `f=p|i|m|a` (right-hand finger).
 - Notes held across a barline: write the note in its own measure with the full
   duration (e.g. beat 3, duration 2); exporters split and tie it.
 - When patching, include **every** note of each measure you send — measures in

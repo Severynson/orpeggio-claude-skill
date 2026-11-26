@@ -534,6 +534,70 @@ def transpose(arrangement: Path, semitones: Annotated[int, typer.Option(allow_da
 
 
 @command
+def detect_expression(
+    audio: Annotated[Path, typer.Argument(help="Recording or stem (a stem gives cleaner results)")],
+    notes: Annotated[Path, typer.Argument(help="Transcription JSON whose notes to analyse")],
+    output: Out = None,
+    tracks: Annotated[Optional[str], typer.Option(help="Track ids to analyse (default: all pitched)")] = None,
+    min_duration: Annotated[float, typer.Option(help="Skip notes shorter than this (s)")] = 0.3,
+):
+    """Measure real vibrato and bends of transcribed notes in the recording."""
+    from arpeggio.transcription.expression import detect_expression as run
+
+    res = run(audio, load(notes, "transcription"), _list(tracks), min_duration)
+    out = save(res, output or notes.parent / "expression.json")
+    emit({"output": str(out), "stats": res["stats"],
+          "examples": res["notes"][:12]})
+
+
+@command
+def suggest_techniques(
+    arrangement: Path,
+    output: Out = None,
+    expression: Annotated[Optional[Path], typer.Option(help="expression.json (detect-expression) = evidence")] = None,
+    score: Annotated[Optional[Path], typer.Option(help="score.json, to map arrangement bars to recording time")] = None,
+    bar_offset: Annotated[int, typer.Option(help="recording bar = arrangement bar + offset")] = 0,
+    idiomatic: Annotated[bool, typer.Option(help="Also propose idiomatic vibrato/slides/legato")] = True,
+    apply: Annotated[Optional[str], typer.Option(help="Apply: evidence | safe | all (default: only suggest)")] = None,
+    min_confidence: Annotated[float, typer.Option(help="Threshold for --apply safe")] = 0.5,
+    density_bars: Annotated[float, typer.Option(help="At most one idiomatic vibrato per N bars")] = 2.0,
+    exclude: Annotated[Optional[str], typer.Option(
+        help="Never suggest these, comma list: slide, bend, vibrato, legato, h, p, late_vibrato, …")] = None,
+):
+    """Suggest (and optionally apply) vibrato, bends, slides, hammer-ons/pull-offs.
+
+    Never changes pitches or rhythm — only the `technique` of notes. Run after
+    optimize-tablature (needs string/fret), then validate-arrangement.
+    """
+    from arpeggio.arrangement import techniques as T
+
+    arr = load(arrangement, "arrangement")
+    if not any(n.string is not None for n in arr.notes):
+        raise ArpeggioError("arrangement has no tablature yet: run optimize-tablature first")
+    expr = load_json(expression) if expression else None
+    sc = load(score, "score") if score else None
+    if expr and sc is None:
+        raise ArpeggioError("--expression needs --score (to map bars to recording time)")
+    sugg = T.suggest(arr, expr, sc, bar_offset, idiomatic, density_bars, set(_list(exclude) or []))
+    applied = 0
+    if apply:
+        if apply not in ("evidence", "safe", "all"):
+            raise ArpeggioError("--apply must be evidence, safe or all")
+        applied = T.apply(sugg, apply, min_confidence)
+        save(arr, output or arrangement)
+    rep = arrangement.with_name(arrangement.stem + ".techniques.json")
+    pub = T.public(sugg)
+    save({"kind": "technique_suggestions", "suggestions": pub}, rep)
+    from collections import Counter
+
+    emit({"report": str(rep), "output": str(output or arrangement) if apply else None,
+          "suggested": len(pub), "applied": applied,
+          "by_technique": dict(Counter(s["technique"] for s in pub)),
+          "by_kind": dict(Counter(s["kind"] for s in pub)),
+          "suggestions": pub[:30]})
+
+
+@command
 def optimize_tablature(
     arrangement: Path, output: Out = None,
     tuning: Annotated[Optional[str], typer.Option(help="Name (standard, drop_d, dadgad...) or E2,A2,...")] = None,

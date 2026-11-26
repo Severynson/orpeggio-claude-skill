@@ -272,3 +272,126 @@ def test_musicxml_concert_pitch_and_tab_positions(tmp_path: Path):
     assert "<step>E</step><octave>2</octave>" in xml and "<step>E</step><octave>4</octave>" in xml
     assert "<transpose>" not in xml
     assert "<string>6</string><fret>0</fret>" in xml and "<string>1</string><fret>0</fret>" in xml
+
+
+# ---------------------------------------------------------------- techniques
+
+
+def _synthetic_expression_wav(path: Path):
+    import numpy as np
+    import soundfile as sf
+
+    sr = 22050
+    t = np.arange(8 * sr) / sr
+
+    def tone(f_inst, a0, a1, amp=0.3):
+        seg = (t >= a0) & (t < a1)
+        ph = np.cumsum(f_inst) / sr
+        s = sum(amp / k * np.sin(2 * np.pi * k * ph) for k in (1, 2, 3))
+        return np.where(seg, s * np.minimum(1, (t - a0) * 20) * np.exp(-(t - a0) * 0.8), 0)
+
+    hz = lambda m: 440 * 2 ** ((m - 69) / 12)  # noqa: E731
+    y = tone(np.full_like(t, hz(64)), 0.5, 2.0)
+    y += tone(hz(67) * 2 ** (40 * np.sin(2 * np.pi * 6 * (t - 3)) / 1200 * (t > 3.3)), 3.0, 4.6)
+    y += tone(hz(69) * 2 ** (np.clip((t - 6.1) / 0.15, 0, 1) * 200 / 1200), 6.0, 7.5)
+    for m in (40, 47, 52):
+        y += tone(np.full_like(t, hz(m)), 0, 8, 0.25)
+    sf.write(path, y + 0.01 * np.random.default_rng(0).standard_normal(len(t)), sr)
+
+
+def test_detect_expression_synthetic(tmp_path: Path):
+    from arpeggio.transcription.expression import detect_expression
+
+    wav = tmp_path / "e.wav"
+    _synthetic_expression_wav(wav)
+    tr = Transcription(source=Source(path="x"), provenance=Provenance(backend="t"), tracks=[
+        Track(id="g", instrument="g", notes=[TimedNote(pitch=64, start=0.5, end=2.0),
+                                             TimedNote(pitch=67, start=3.0, end=4.6),
+                                             TimedNote(pitch=69, start=6.0, end=7.5)])])
+    res = detect_expression(wav, tr)
+    by_pitch = {n["pitch"]: n for n in res["notes"]}
+    assert 64 not in by_pitch  # steady note is not flagged
+    assert 5.5 <= by_pitch[67]["vibrato"]["rate_hz"] <= 6.5
+    assert by_pitch[69]["bend"]["cents"] == 200
+
+
+def test_suggest_techniques_rules():
+    from arpeggio.arrangement import techniques as T
+
+    arr, _ = optimize(from_text(
+        "M 1 Am\n0 bass A2 4\n0 mel C5:1/8 1\n1 mel D5:1/10 3 lock\n"     # long exposed fretted note -> vibrato
+        "M 2 Am\n0 bass A2 4\n0 mel E4:1/0 4\n"                          # open string -> never vibrato
+        "M 3 Am\n0 bass A2 1\n0 mel C5:2/13 .5\n.5 mel D5:2/15 .5\n"     # quick step on one string -> h
+        "1 mel C5:2/13 3\n2 bass C3 1\n3 bass E3 1\n"                    # moving fretted bass -> busy hand
+        "@difficulty advanced\n"))
+    sugg = T.suggest(arr)
+    got = {(s["measure"], s["beat"], s["technique"]): s for s in sugg}
+    assert (1, 1.0, "vibrato") in got
+    assert not any(s["measure"] == 2 and s["technique"] == "vibrato" for s in sugg)
+    assert (3, 0.5, "h") in got and (3, 1.0, "p") in got
+    busy = [s for s in sugg if s["measure"] == 3 and s["technique"] == "vibrato"]
+    assert all(s["confidence"] < 0.5 for s in busy)
+    applied = T.apply(sugg, "safe")
+    assert applied >= 3
+    assert validate(arr)["errors"] == 0
+
+
+def test_technique_checks_and_exports(tmp_path: Path):
+    arr, _ = optimize(from_text(
+        "M 1\n0 mel E4:1/0 2 tech=vibrato\n2 mel G4:1/3 1 tech=p\n3 mel A4:1/5 1 tech=h+vibrato\n"))
+    codes = {i["code"] for i in validate(arr)["issues"]}
+    assert "open_string_effect" in codes and "pull_direction" in codes
+    good, _ = optimize(from_text(
+        "M 1\n0 mel G#4:1/4 1\n1 mel A4:1/5 3 tech=h+vibrato\nM 2\n0 mel B4:1/7 1.5\n1.5 mel D5:1/10 2.5 tech=slide\n"))
+    assert validate(good)["errors"] == 0 and validate(good)["warnings"] == 0
+    gp = export_gp5(good, tmp_path / "t.gp5")
+    import guitarpro
+
+    notes = [n for m in guitarpro.parse(str(gp)).tracks[0].measures for v in m.voices for b in v.beats
+             for n in b.notes]
+    assert notes[0].effect.hammer and notes[1].effect.vibrato  # hammer is marked on the origin note
+    assert guitarpro.SlideType.legatoSlideTo in notes[2].effect.slides
+    xml = export_musicxml(good, tmp_path / "t.musicxml").read_text()
+    assert "vib.</words>" in xml and '<hammer-on type="start">' in xml and '<slide type="start"' in xml
+    assert "<wavy-line" not in xml  # MuseScore would import it as a trill
+    tab = render_ascii(good)
+    assert "h5~" in tab and "/10" in tab
+    import pretty_midi
+
+    mid = pretty_midi.PrettyMIDI(str(export_midi(good, tmp_path / "t.mid")))
+    assert sum(len(i.pitch_bends) for i in mid.instruments) > 20
+
+
+def test_late_vibrato_keeps_moving_bass(tmp_path: Path):
+    from arpeggio.arrangement import techniques as T
+    from arpeggio.export.simple import export_midi
+
+    src = ("M 1 G5\n0 bass G2:6/3 1\n0 mel A4:1/5 4\n1 bass G2:6/3 1\n2 bass A#2:5/1 1\n3 bass B2:5/2 1\n"
+           "M 2 G5\n0 bass G2:6/3 4\n0 mel G#4:1/4 1\n1 mel G#4:1/4 1\n@tempo 130\n")
+    arr, _ = optimize(from_text(src))
+    sugg = T.suggest(arr)
+    late = [s for s in sugg if s["measure"] == 1 and s["pitch"] == "A4"]
+    assert late and late[0]["technique"] == "late_vibrato" and late[0]["confidence"] >= 0.5
+    assert not T.suggest(arr, exclude={"vibrato"}) or all(
+        "vibrato" not in s["technique"] for s in T.suggest(arr, exclude={"vibrato"}))
+    T.apply(sugg, "safe")
+    before = sorted((n.measure, n.beat, n.pitch, n.duration) for n in arr.notes)
+    assert validate(arr)["errors"] == 0
+    a4 = next(n for n in arr.notes if name_to_midi(n.pitch) == 69)
+    assert T.late_vibrato_offset(a4, arr.notes, 4.0) == 3.0  # after the last bass change
+    # notation: plain dotted half tied to a quarter with vibrato; nothing else changes
+    exp = T.expand_late_vibrato(arr)
+    pieces = sorted((n.beat, n.duration, n.tie, n.technique) for n in exp.notes if name_to_midi(n.pitch) == 69)
+    assert pieces == [(0.0, 3.0, False, None), (3.0, 1.0, True, "vibrato")]
+    assert sorted((n.measure, n.beat, n.pitch, n.duration) for n in arr.notes) == before
+    import guitarpro
+
+    gpn = [n for m in guitarpro.parse(str(export_gp5(arr, tmp_path / "l.gp5"))).tracks[0].measures
+           for v in m.voices for b in v.beats for n in b.notes if n.string == 1]
+    assert [(n.type.name, n.effect.vibrato) for n in gpn[:2]] == [("normal", False), ("tie", True)]
+    assert "(~)" in render_ascii(arr)
+    import pretty_midi
+
+    pm = pretty_midi.PrettyMIDI(str(export_midi(arr, tmp_path / "l.mid")))
+    bends = [p.time for i in pm.instruments for p in i.pitch_bends if p.pitch]
+    assert bends and min(bends) >= 3 * 60 / 130 - 1e-3  # wobble starts on beat 4

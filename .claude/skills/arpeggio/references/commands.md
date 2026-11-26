@@ -58,12 +58,16 @@ Score compact format (`get-section score.json`):
 | `transpose ARR --semitones N` | Transpose (clears tablature) |
 | `optimize-tablature ARR` | Viterbi + refinement fingering. Options `--tuning --capo --difficulty --no-repair`. Reports `changes` (octave shifts, drops, shortened sustains, unlocks), `unplayable_groups`, fret range |
 | `validate-arrangement ARR` | Errors/warnings/info with measure, beat and suggestion; full list in `<arr>.validation.json`. `--severity info` to see everything |
-| `render-tab ARR [--measures a-b]` | ASCII tab to stdout for review |
+| `render-tab ARR [--measures a-b]` | ASCII tab to stdout for review (`h5` hammer-on, `p0` pull-off, `/7` slide, `5~` vibrato, `5(~)` late vibrato, `7b` bend, `<12>` harmonic) |
+| `detect-expression AUDIO NOTES.json [--tracks ...]` | Measures real vibrato (rate Hz, depth cents) and bends of transcribed notes, by narrow-band tracking around each known pitch; masks notes whose band is polluted by other sounding notes. A stem (`separate`) gives cleaner evidence. Output `expression.json` |
+| `suggest-techniques ARR [--expression E --score S --bar-offset N] [--apply evidence\|safe\|all] [--min-confidence 0.5] [--density-bars 2] [--no-idiomatic] [--exclude slide,bend]` | Proposes techniques with `kind` (`evidence` / `idiomatic`), `confidence` and `reason`; never changes pitch or rhythm. Proposes `late_vibrato` when the bass moves under a long note. `--exclude` drops technique families the user doesn't want. Report in `<arr>.techniques.json`; `--apply` writes them into the arrangement. Needs tablature (run after `optimize-tablature`) |
 
 Validation codes: `unassigned`, `pitch_mismatch`, `out_of_range`,
 `string_collision`, `too_many_notes`, `stretch`, `fingers`, `beat_out_of_measure`
 (errors); `high_fret`, `dense_chord`, `right_hand`, `cut_sustain`, `fast_shift`
-(warnings); `melody_not_top`, `empty_measures` (info).
+(warnings); `melody_not_top`, `empty_measures` (info). Technique checks:
+`open_string_effect`, `legato_without_source`, `legato_gap`, `hammer_direction`,
+`pull_direction`, `legato_stretch`, `bend_low_string`, `unknown_technique`.
 
 Difficulty limits: beginner span 3 / fret ≤7 / 3 notes at once; intermediate
 span 4 / fret ≤12 / 4 notes; advanced span 5 / fret ≤17 / 6 notes.

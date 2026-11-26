@@ -13,6 +13,9 @@ from arpeggio.theory import key_fifths, name_to_midi
 
 
 def export_gp5(arr: Arrangement, path: str | Path) -> Path:
+    from arpeggio.arrangement.techniques import expand_late_vibrato
+
+    arr = expand_late_vibrato(arr)  # delayed vibrato = plain note tied to a vibrato note
     fb = Fretboard.from_spec(arr.tuning, 0, arr.instrument)  # GP stores open tuning + capo offset
     num, _, den = arr.time_signature.partition("/")
     num, den = int(num), int(den or 4)
@@ -48,6 +51,7 @@ def export_gp5(arr: Arrangement, path: str | Path) -> Path:
     track.measures = [gp.Measure(track, h) for h in song.measureHeaders]
     song.tracks = [track]
 
+    pieces: dict[int, list] = {}  # id(ArrNote) -> GP notes (tied pieces in order)
     for mi, measure in enumerate(track.measures):
         m = mi + 1
         for vi, v in enumerate((1, 2)):
@@ -71,24 +75,74 @@ def export_gp5(arr: Arrangement, path: str | Path) -> Path:
                     used.add(n.string)
                     note = gp.Note(beat, value=int(n.fret), string=int(n.string), velocity=gp.Velocities.forte,
                                    type=gp.NoteType.tie if r.tie_from_prev else gp.NoteType.normal)
-                    tech = (n.technique or "").lower()
-                    if tech in ("h", "hammer", "p", "pull"):
-                        note.effect.hammer = True
-                    elif tech in ("slide", "s"):
-                        note.effect.slides = [gp.SlideType.shiftSlideTo]
-                    elif tech in ("harmonic", "nh"):
-                        note.effect.harmonic = gp.NaturalHarmonic()
-                    elif tech == "let_ring":
-                        note.effect.letRing = True
-                    elif tech == "vibrato":
-                        note.effect.vibrato = True
+                    pieces.setdefault(id(n), []).append(note)
+                    if not r.tie_from_prev or n.tie:
+                        _target_effects(note, beat, n)
                     beat.notes.append(note)
                 if e.notes and not beat.notes:
                     beat.status = gp.BeatStatus.rest
                 voice.beats.append(beat)
+    _origin_effects(arr, pieces)
     path = Path(path)
     gp.write(song, str(path), version=(5, 1, 0))
     return path
+
+
+def _target_effects(note, beat, n) -> None:
+    """Effects Guitar Pro stores on the note itself."""
+    from arpeggio.arrangement.techniques import tokens
+
+    for t in tokens(n):
+        if t == "vibrato":
+            note.effect.vibrato = True
+        elif t == "wide_vibrato":
+            beat.effect.vibrato = True  # GP5 "wide vibrato" is a beat effect
+        elif t in ("bend", "bend_half", "bend_release"):
+            q = 2 if t == "bend_half" else 4  # GP bend points are in quarter tones
+            pts = [gp.BendPoint(0, 0), gp.BendPoint(3, q), gp.BendPoint(6, q)]
+            if t == "bend_release":
+                pts += [gp.BendPoint(9, q), gp.BendPoint(12, 0)]
+                kind = gp.BendType.bendRelease
+            else:
+                pts += [gp.BendPoint(12, q)]
+                kind = gp.BendType.bend
+            note.effect.bend = gp.BendEffect(type=kind, value=q * 25, points=pts)
+        elif t == "slide_in":
+            note.effect.slides = note.effect.slides + [gp.SlideType.intoFromBelow]
+        elif t == "slide_out":
+            note.effect.slides = note.effect.slides + [gp.SlideType.outDownwards]
+        elif t == "harmonic":
+            note.effect.harmonic = gp.NaturalHarmonic()
+        elif t == "let_ring":
+            note.effect.letRing = True
+        elif t == "palm_mute":
+            note.effect.palmMute = True
+        elif t == "staccato":
+            note.effect.staccato = True
+        elif t == "ghost":
+            note.effect.ghostNote = True
+        elif t == "accent":
+            note.effect.accentuatedNote = True
+
+
+def _origin_effects(arr: Arrangement, pieces: dict) -> None:
+    """Hammer-on/pull-off and legato slides are marked on the note *before* the target."""
+    from arpeggio.arrangement.tablature import measure_quarters
+    from arpeggio.arrangement.techniques import previous_on_string, tokens
+
+    mlen = measure_quarters(arr.time_signature)
+    for n in arr.notes:
+        toks = tokens(n)
+        if not any(t in ("h", "p", "slide") for t in toks):
+            continue
+        prev = previous_on_string(arr.notes, n, mlen)
+        if prev is None or id(prev) not in pieces:
+            continue
+        origin = pieces[id(prev)][-1]
+        if "h" in toks or "p" in toks:
+            origin.effect.hammer = True
+        if "slide" in toks:
+            origin.effect.slides = origin.effect.slides + [gp.SlideType.legatoSlideTo]
 
 
 def _has_chord_v1(events, m, e) -> bool:
