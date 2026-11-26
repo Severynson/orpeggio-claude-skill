@@ -1,0 +1,274 @@
+"""Unit tests for the symbolic part of Arpeggio (no ML models, no network)."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from arpeggio.analysis.chordsheet import align_chords_with_lyrics, parse_chord_sheet, render_text
+from arpeggio.analysis.harmony import analyze_harmony, roman_numeral
+from arpeggio.analysis.quantize import quantize
+from arpeggio.analysis.voices import extract_voices
+from arpeggio.arrangement.draft import draft_arrangement
+from arpeggio.arrangement.instruments import Fretboard
+from arpeggio.arrangement.tablature import chord_voicings, optimize
+from arpeggio.arrangement.textfmt import from_text, patch, to_text
+from arpeggio.arrangement.validate import validate
+from arpeggio.export.events import build_events
+from arpeggio.export.gp5 import export_gp5, read_back
+from arpeggio.export.musicxml import export_musicxml
+from arpeggio.export.simple import export_midi, export_pdf, render_ascii
+from arpeggio.schema import (
+    ChordSegment, Chords, LyricLine, Lyrics, Provenance, Rhythm, Source, TimedNote, Track,
+    Transcription, Word,
+)
+from arpeggio.theory import harte_to_symbol, key_fifths, name_to_midi, parse_chord, transpose_chord
+
+ATF = """\
+@title Test Tune
+@instrument classical_guitar
+@tuning standard
+@difficulty intermediate
+@tempo 90
+@time 4/4
+@key A minor
+@section Intro 1-2
+
+M 1 Am
+0    bass A2 2
+0    mel  E4 1
+1    mel  C5 .5
+1.5  harm A3,C4 .5
+2    bass E2 2
+2    mel  B4 2
+M 2 F | G@2
+0    bass F2 2
+0    mel  A4 1.5
+1.5  mel  G4 .5
+2    bass G2 2
+2    mel  B4:1/7 2 lock
+"""
+
+
+def _arr():
+    return from_text(ATF)
+
+
+# ---------------------------------------------------------------- theory
+
+
+def test_theory_basics():
+    assert name_to_midi("E2") == 40 and name_to_midi("C#4") == 61 and name_to_midi("Bb3") == 58
+    assert parse_chord("Am7")["pitch_classes"] == [0, 4, 7, 9]
+    assert parse_chord("C/E")["bass_pc"] == 4
+    assert harte_to_symbol("A:min") == "Am" and harte_to_symbol("C:maj/3") == "C/E"
+    assert harte_to_symbol("G:7") == "G7" and harte_to_symbol("N") == "N"
+    assert transpose_chord("Am", 3) == "Cm" and transpose_chord("Bb", 2) == "C"
+    assert key_fifths("A minor") == (0, True) and key_fifths("D major") == (2, False)
+    assert roman_numeral("E7", "A minor") == "V7"
+
+
+# ---------------------------------------------------------------- text format
+
+
+def test_atf_roundtrip():
+    arr = _arr()
+    assert arr.title == "Test Tune" and arr.instrument == "classical_guitar"
+    assert len(arr.notes) == 12 and len(arr.chords) == 3
+    assert arr.sections[0].name == "Intro"
+    locked = [n for n in arr.notes if n.locked]
+    assert locked and locked[0].string == 1 and locked[0].fret == 7
+    again = from_text(to_text(arr))
+    assert len(again.notes) == len(arr.notes)
+    assert sorted(name_to_midi(n.pitch) for n in again.notes) == sorted(name_to_midi(n.pitch) for n in arr.notes)
+
+
+def test_atf_sharp_not_comment_and_errors():
+    arr = from_text("M 1 F#m\n0 mel F#4 1 // comment\n# full comment\n")
+    assert name_to_midi(arr.notes[0].pitch) == 66
+    with pytest.raises(ValueError, match="line 1"):
+        from_text("0 mel E4 1\n")
+
+
+def test_patch_replaces_measures():
+    arr = _arr()
+    sec = from_text("M 2 Dm\n0 mel D4 4\n", arr)
+    out = patch(arr, sec)
+    m2 = [n for n in out.notes if n.measure == 2]
+    assert len(m2) == 1 and name_to_midi(m2[0].pitch) == 62
+    assert [c.chord for c in out.chords if c.measure == 2] == ["Dm"]
+
+
+# ---------------------------------------------------------------- tablature
+
+
+def test_fretboard_positions():
+    fb = Fretboard.from_spec("standard")
+    assert (6, 0) in fb.positions(40) and fb.positions(39) == []
+    assert (1, 0) in fb.positions(64) and (2, 5) in fb.positions(64)
+    capo = Fretboard.from_spec("standard", capo=2)
+    assert capo.string_pitch(6) == 42 and (6, 0) in capo.positions(42)
+
+
+def test_optimize_and_validate():
+    arr, report = optimize(_arr())
+    assert report["assigned"] == len(arr.notes)
+    fb = Fretboard.from_spec(arr.tuning, arr.capo, arr.instrument)
+    for n in arr.notes:
+        assert fb.pitch_at(n.string, n.fret) == name_to_midi(n.pitch)
+    locked = [n for n in arr.notes if n.locked][0]
+    assert (locked.string, locked.fret) == (1, 7)
+    v = validate(arr)
+    assert v["valid"], v["issues"]
+
+
+def test_validate_catches_problems():
+    arr = from_text("M 1\n0 mel E4:2/9 1\n0 bass E2:6/1 1\n0 harm G3:2/0 1\n")
+    v = validate(arr)
+    codes = {i["code"] for i in v["issues"]}
+    assert not v["valid"]
+    assert "pitch_mismatch" in codes and "string_collision" in codes
+
+
+def test_optimizer_repairs_impossible_chord():
+    # 7 notes at once cannot be played on 6 strings: optimizer must drop accompaniment, keep melody
+    arr = from_text("M 1\n0 mel E5 1\n0 harm C4,E4,G4,C5,G3 1\n0 bass C3 1\n")
+    out, report = optimize(arr)
+    assert any(c["action"] in ("drop", "octave_shift", "drop_duplicate") for c in report["changes"])
+    assert any(n.role == "melody" and name_to_midi(n.pitch) == 76 for n in out.notes)
+    assert validate(out)["errors"] == 0
+
+
+def test_chord_voicings():
+    fb = Fretboard.from_spec("standard")
+    shapes = [v["shape"] for v in chord_voicings("C", fb)]
+    assert "x32010" in shapes
+    assert "022000" in [v["shape"] for v in chord_voicings("Em", fb)]
+
+
+# ---------------------------------------------------------------- export
+
+
+def test_events_fill_measures():
+    arr, _ = optimize(_arr())
+    count, ev = build_events(arr)
+    assert count == 2
+    for v in (1, 2):
+        for m in (1, 2):
+            assert sum(e.duration for e in ev[v][m]) == 4
+
+
+def test_exports(tmp_path: Path):
+    arr, _ = optimize(_arr())
+    gp = export_gp5(arr, tmp_path / "t.gp5")
+    back = read_back(gp)
+    assert back["measures"] == 2 and back["notes"] >= 12
+    xml = export_musicxml(arr, tmp_path / "t.musicxml")
+    import music21
+
+    sc = music21.converter.parse(str(xml))
+    assert len(sc.parts) >= 1  # notation + TAB may parse as PartStaffs
+    assert len(list(sc.recurse().notes)) > 0
+    mid = export_midi(arr, tmp_path / "t.mid")
+    import pretty_midi
+
+    assert len(pretty_midi.PrettyMIDI(str(mid)).instruments[0].notes) == 12
+    tab = render_ascii(arr)
+    assert "e|" in tab and "Am" in tab
+    pdf = export_pdf(arr, tmp_path / "t.pdf")
+    assert Path(pdf["path"]).read_bytes().startswith(b"%PDF")
+
+
+# ---------------------------------------------------------------- analysis
+
+
+def _fake_song():
+    beats = [i * 0.5 for i in range(33)]  # 120 bpm, 8 bars
+    src = Source(path="fake.wav")
+    rh = Rhythm(source=src, provenance=Provenance(backend="test"), tempo_bpm=120, beats_per_bar=4,
+                time_signature="4/4", beats=beats, downbeats=beats[::4])
+    mel = [TimedNote(pitch=p, start=i * 0.5, end=i * 0.5 + 0.45) for i, p in
+           enumerate([76, 74, 72, 71, 69, 71, 72, 74] * 4)]
+    bass = [TimedNote(pitch=p, start=i * 2.0, end=i * 2.0 + 1.9) for i, p in enumerate([45, 41, 48, 43] * 2)]
+    tr = Transcription(source=src, provenance=Provenance(backend="test"),
+                       tracks=[Track(id="voice", instrument="voice", notes=mel),
+                               Track(id="electric_bass", instrument="electric_bass", notes=bass)])
+    ch = Chords(source=src, provenance=Provenance(backend="test"),
+                chords=[ChordSegment(chord=c, start=i * 2.0, end=i * 2.0 + 2) for i, c in
+                        enumerate(["Am", "F", "C", "G"] * 2)])
+    return tr, rh, ch
+
+
+def test_quantize_voices_harmony_draft():
+    tr, rh, ch = _fake_song()
+    sc = quantize(tr, rh, chords=ch)
+    assert sc.measure_count == 8 and sc.key in ("A minor", "C major")
+    m1 = [n for n in sc.tracks[0].notes if n.measure == 1]
+    assert [n.beat for n in m1] == [0, 1, 2, 3]
+    assert sc.chords[0].chord == "Am" and sc.chords[1].measure == 2
+    vo = extract_voices(sc)
+    assert vo.tracks[0].model_extra["source_tracks"] == ["voice"]
+    assert len(vo.tracks[0].notes) == 32
+    h = analyze_harmony(sc)
+    assert h["agreement_detected_vs_notes"] is not None
+    arr, info = draft_arrangement(vo, style="arpeggio", instrument="classical_guitar")
+    assert info["melody_notes"] == 32 and info["bass_notes"] >= 8
+    arr2, rep = optimize(arr)
+    assert rep["assigned"] == len(arr2.notes)
+    assert validate(arr2)["errors"] == 0
+
+
+def test_chord_sheet_alignment_and_parse():
+    src = Source(path="x")
+    ch = Chords(source=src, provenance=Provenance(backend="t"),
+                chords=[ChordSegment(chord="Am", start=0, end=2), ChordSegment(chord="F", start=2, end=4)])
+    words = [Word(text=t, start=s, end=s + 0.4) for t, s in
+             [("The", 0.1), ("stars", 0.6), ("are", 1.2), ("shining", 2.05)]]
+    ly = Lyrics(source=src, provenance=Provenance(backend="t"),
+                lines=[LyricLine(text="The stars are shining", start=0.1, end=2.45, words=words)])
+    sheet = align_chords_with_lyrics(ch, ly)
+    text = render_text(sheet)
+    chord_line, lyric_line = text.splitlines()[:2]
+    assert chord_line.startswith("Am") and lyric_line == "The stars are shining"
+    assert chord_line.index("F") == lyric_line.index("shining")
+    parsed = parse_chord_sheet("[Verse]\nAm      F\nThe stars are shining\n[C]Across the [G]sky\n")
+    assert parsed["chord_vocabulary"] == ["Am", "C", "F", "G"]
+    assert parsed["lines"][0]["section"] == "Verse" and parsed["lines"][0]["chords"][1]["char"] == 8
+
+
+# ---------------------------------------------------------------- CLI
+
+
+def test_cli_end_to_end(tmp_path: Path):
+    atf = tmp_path / "a.atf"
+    atf.write_text(ATF)
+
+    def run(*args):
+        r = subprocess.run([sys.executable, "-m", "arpeggio.cli", *map(str, args)], capture_output=True,
+                           text=True, cwd=tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return r.stdout
+
+    out = json.loads(run("import-arrangement", atf, "-o", tmp_path / "a.json"))
+    assert out["ok"] and out["notes"] == 12
+    json.loads(run("optimize-tablature", tmp_path / "a.json"))
+    v = json.loads(run("validate-arrangement", tmp_path / "a.json"))
+    assert v["valid"]
+    e = json.loads(run("export", tmp_path / "a.json", "--format", "gp5,ascii,midi"))
+    assert Path(e["files"]["gp5"]["path"]).exists()
+    assert "M 1 Am" in run("export-text", tmp_path / "a.json", "--measures", "1-1")
+    assert "|" in run("render-tab", tmp_path / "a.json")
+
+
+def test_musicxml_concert_pitch_and_tab_positions(tmp_path: Path):
+    """MuseScore reads <pitch> as concert pitch under a treble-8vb clef; TAB frets must match."""
+    arr, _ = optimize(from_text("M 1\n0 bass E2:6/0 4\n0 mel E4:1/0 4\n"))
+    xml = export_musicxml(arr, tmp_path / "o.musicxml").read_text()
+    assert "<clef-octave-change>-1</clef-octave-change>" in xml
+    assert "<step>E</step><octave>2</octave>" in xml and "<step>E</step><octave>4</octave>" in xml
+    assert "<transpose>" not in xml
+    assert "<string>6</string><fret>0</fret>" in xml and "<string>1</string><fret>0</fret>" in xml

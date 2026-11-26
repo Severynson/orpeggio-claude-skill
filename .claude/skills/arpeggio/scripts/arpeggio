@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Run the Arpeggio CLI from anywhere.
+# Resolves the repository from $ARPEGGIO_HOME, or from this script's real location
+# (works when the skill folder is symlinked into ~/.claude/skills/).
+set -euo pipefail
+if [[ -n "${ARPEGGIO_HOME:-}" ]]; then
+  repo="$ARPEGGIO_HOME"
+else
+  src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  repo="$(cd -P "$(dirname "$src")/../../../.." && pwd)"
+fi
+if [[ ! -f "$repo/pyproject.toml" ]]; then
+  echo '{"ok": false, "error": "Arpeggio repository not found; set ARPEGGIO_HOME to the repo path"}'
+  exit 1
+fi
+if [[ -x "$repo/.venv/bin/arpeggio" ]]; then
+  exec "$repo/.venv/bin/arpeggio" "$@"
+fi
+exec uv run --project "$repo" --extra ml arpeggio "$@"
