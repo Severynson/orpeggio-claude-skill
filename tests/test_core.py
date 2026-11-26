@@ -468,3 +468,35 @@ def test_lyrics_attach_and_export(tmp_path: Path):
     assert "Привет" in render_ascii(arr) and "Привет" not in render_ascii(arr, lyrics=False)
     gp_plain = guitarpro.parse(str(export_gp5(arr, tmp_path / "p.gp5", lyrics=False)))
     assert not gp_plain.lyrics.lines[0].lyrics
+
+
+def test_gp5_lyrics_anchor_and_line_restart(tmp_path: Path):
+    import guitarpro
+
+    from arpeggio.schema import ArrLyric
+
+    # melody holds a whole note while the bass moves; words sung on beats 0 and 3 (pickup)
+    # bar 2: late vibrato -> tied beat; bar 3: words again (must restart on a new line)
+    arr, _ = optimize(from_text(
+        "M 1 Am\n0 mel A4:1/5 4\n0 bass A2 1\n1 bass C3 1\n2 bass E3 1\n3 bass G3 1\n"
+        "M 2 Am\n0 mel C5:1/8 4 tech=late_vibrato\n0 bass A2 4\n"
+        "M 3 Am\n0 mel E5:1/12 2\n2 mel D5:1/10 2\n0 bass A2 4\n"))
+    arr.lyrics = [ArrLyric(text="one", measure=1, beat=0.0), ArrLyric(text="two", measure=1, beat=3.05),
+                  ArrLyric(text="three", measure=3, beat=0.0), ArrLyric(text="four", measure=3, beat=2.0)]
+    song = guitarpro.parse(str(export_gp5(arr, tmp_path / "a.gp5")))
+    lines = [(l.startingMeasure, l.lyrics) for l in song.lyrics.lines if l.lyrics]
+    assert lines == [(1, "one two"), (3, "three four")]  # bass at beat 3 moved into voice 1
+    v1 = song.tracks[0].measures[0].voices[0].beats
+    pos, starts = 0.0, []
+    for b in v1:
+        if b.notes:
+            starts.append(pos)
+        pos += 4 / b.duration.value * (1.5 if b.duration.isDotted else 1)
+    assert starts == [0.0, 3.0]  # voice 1 now strikes where "two" is sung
+    assert any(n.effect.letRing for b in v1 for n in b.notes)  # the cut A4 keeps ringing
+    plain = guitarpro.parse(str(export_gp5(arr, tmp_path / "p.gp5", lyrics=False)))
+
+    def struck(s):
+        return sorted((mi, n.string, n.value) for mi, m in enumerate(s.tracks[0].measures)
+                      for v in m.voices for b in v.beats for n in b.notes if n.type != guitarpro.NoteType.tie)
+    assert struck(song) == struck(plain)  # same notes, frets and bars

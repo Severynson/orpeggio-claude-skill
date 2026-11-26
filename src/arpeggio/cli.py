@@ -730,13 +730,17 @@ def export(
         from fractions import Fraction
 
         from arpeggio.export.events import build_events
-        from arpeggio.export.lyrics import gp_lyrics_line, place
+        from arpeggio.export.lyrics import place
 
         num, _, den = arr.time_signature.partition("/")
+        from arpeggio.arrangement.techniques import expand_late_vibrato
+        from arpeggio.export.lyrics import gp_plan
+
         evs, ml = build_events(arr)[1], Fraction(int(num) * 4, int(den or 4))
-        sl, assign, stats = place(arr, evs, ml)
-        gp_texts.append(gp_lyrics_line(sl, assign)[1])
-        extra["lyrics"] = {"gp5": stats, "musicxml_pdf": place(arr, evs, ml, voices=(1, 2))[2],
+        _, _, _, gp_lines, gp_stats = gp_plan(expand_late_vibrato(arr), gp5_lyrics == "track")
+        gp_texts += [t for _, t in gp_lines]
+        extra["lyrics"] = {"gp5": {**gp_stats, "line_start_bars": [m for m, _ in gp_lines]},
+                           "musicxml_pdf": place(arr, evs, ml, voices=(1, 2))[2],
                            "midi": "exact sung onsets (lyric meta events)"}
     elif arr.lyrics:
         extra["lyrics"] = "excluded (--no-lyrics)"

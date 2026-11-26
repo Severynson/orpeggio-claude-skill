@@ -81,14 +81,107 @@ def slot_text(words) -> str:
 
 
 def gp_lyrics_line(sl, assign) -> tuple[int, str]:
-    """(starting measure, text) for one Guitar Pro lyric line covering all words."""
+    """(starting measure, text) of the first Guitar Pro lyric line (see gp_lyrics_lines)."""
+    lines = gp_lyrics_lines(sl, assign)
+    return lines[0] if lines else (1, "")
+
+
+def gp_lyrics_lines(sl, assign, max_lines: int = 5) -> list[tuple[int, str]]:
+    """Guitar Pro lyric lines [(starting bar, text)], at most 5.
+
+    Players disagree on tied beats (Guitar Pro gives them a syllable, Songsterr
+    skips them), so a new line — which restarts the count at its own bar — begins
+    wherever a tied beat lies between two words. Inside a line there are then
+    only struck beats and rests, which every player counts the same way."""
     if not assign:
-        return 1, ""
-    first, last = min(assign), max(assign)
-    start_m = sl[first][1]
-    k0 = next(k for k, s in enumerate(sl) if s[1] == start_m)  # first slot of that measure
-    parts = [slot_text(assign[k]) if k in assign else "" for k in range(k0, last + 1)]
-    return start_m, " ".join(parts)
+        return []
+    keys = sorted(assign)
+    groups = [[keys[0]]]
+    for a, b in zip(keys, keys[1:]):
+        if any(not sl[k][4] for k in range(a + 1, b)):
+            groups.append([b])
+        else:
+            groups[-1].append(b)
+    while len(groups) > max_lines:  # merge the pair with the fewest words (ambiguity stays there)
+        i = min(range(len(groups) - 1), key=lambda i: len(groups[i]) + len(groups[i + 1]))
+        groups[i:i + 2] = [groups[i] + groups[i + 1]]
+    out = []
+    for g in groups:
+        start_m = sl[g[0]][1]
+        k0 = next(k for k, s in enumerate(sl) if s[1] == start_m)  # first beat of that bar
+        parts = [slot_text(assign[k]) if k in assign else "" for k in range(k0, g[-1] + 1)]
+        out.append((start_m, " ".join(parts)))
+    return out
+
+
+def anchor_voice1(arr, tol: float = 0.375, reach: float = 0.6):
+    """Guitar Pro can hang a syllable only on a struck beat of voice 1. Where the
+    melody voice holds a note through a sung word, move the voice-2 notes struck
+    at that moment into voice 1 (same strings/frets/timing). Notes that voice 1
+    now cuts short get `let_ring`, so playback still sustains them. No ties are
+    introduced. Returns (arrangement copy, number of promoted onsets)."""
+    from arpeggio.arrangement.tablature import abs_beat, measure_quarters
+    from arpeggio.arrangement.techniques import add_token
+    from arpeggio.export.events import voice_of
+
+    if not arr.lyrics:
+        return arr, 0
+    mlen = measure_quarters(arr.time_signature)
+    out = arr.model_copy(deep=True)
+    orig_voice = {id(n): voice_of(n) for n in out.notes}
+    v1 = sorted({round(abs_beat(n, mlen), 4) for n in out.notes if voice_of(n) == 1 and not n.tie})
+    v2: dict[float, list] = {}
+    for n in out.notes:
+        if voice_of(n) == 2 and not n.tie and n.string is not None:
+            v2.setdefault(round(abs_beat(n, mlen), 4), []).append(n)
+    promoted = 0
+    for w in sorted(arr.lyrics, key=lambda w: (w.measure, w.beat)):
+        t = (w.measure - 1) * mlen + w.beat
+        if any(abs(a - t) <= tol for a in v1):
+            continue
+        cands = [a for a in v2 if abs(a - t) <= reach and a not in v1]
+        if not cands:
+            continue
+        a = min(cands, key=lambda a: (abs(a - t), a > t))
+        for n in v2.pop(a):
+            n.voice = 1
+        v1 = sorted(v1 + [a])
+        promoted += 1
+    if promoted:
+        def cut(n, voice):
+            s0, e0 = abs_beat(n, mlen), abs_beat(n, mlen) + n.duration
+            return any(s0 + 1e-6 < abs_beat(m, mlen) < e0 - 1e-6
+                       for m in out.notes if m is not n and not m.tie and
+                       (voice_of(m) if voice == "now" else orig_voice[id(m)]) == (
+                           voice_of(n) if voice == "now" else orig_voice[id(n)]))
+        for n in out.notes:
+            if n.string is not None and cut(n, "now") and not cut(n, "before"):
+                add_token(n, "let_ring")
+    return out, promoted
+
+
+def gp_plan(arr, lyrics_track: bool = False):
+    """Everything the GP5 writer needs for lyrics: (arrangement to write, slots,
+    assignment, lines, stats). Guitar mode anchors voice 1 first."""
+    from fractions import Fraction as F
+
+    from arpeggio.export.events import build_events
+
+    num, _, den = arr.time_signature.partition("/")
+    mlen = F(int(num) * 4, int(den or 4))
+    promoted = 0
+    if lyrics_track:
+        from arpeggio.export.gp5 import _rhythm_arrangement
+
+        target = _rhythm_arrangement(arr)
+        write = arr
+    else:
+        write, promoted = anchor_voice1(arr)
+        target = write
+    sl, assign, stats = place(target, build_events(target)[1], mlen)
+    lines = gp_lyrics_lines(sl, assign)
+    stats = {**stats, "lyric_lines": len(lines), "melody_voice_anchors": promoted}
+    return write, sl, assign, lines, stats
 
 
 def gp_encoding(texts: list[str], requested: str = "auto") -> str:

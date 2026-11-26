@@ -23,6 +23,12 @@ def export_gp5(arr: Arrangement, path: str | Path, lyrics: bool = True, encoding
     from arpeggio.arrangement.techniques import expand_late_vibrato
 
     arr = expand_late_vibrato(arr)  # delayed vibrato = plain note tied to a vibrato note
+    plan = None
+    if lyrics and arr.lyrics:
+        from arpeggio.export.lyrics import gp_plan
+
+        plan = gp_plan(arr, lyrics_track)
+        arr = plan[0]  # guitar mode: voice 1 anchored under the sung words
     fb = Fretboard.from_spec(arr.tuning, 0, arr.instrument)  # GP stores open tuning + capo offset
     num, _, den = arr.time_signature.partition("/")
     num, den = int(num), int(den or 4)
@@ -91,21 +97,14 @@ def export_gp5(arr: Arrangement, path: str | Path, lyrics: bool = True, encoding
                 voice.beats.append(beat)
     _origin_effects(arr, pieces)
     texts = [arr.title, arr.artist, arr.arranger] + [s.name for s in arr.sections]
-    if lyrics and arr.lyrics:
-        from fractions import Fraction as _F
-
-        from arpeggio.export.lyrics import gp_lyrics_line, place
-
+    if plan is not None:
+        lines = plan[3]
         if lyrics_track:
             song.tracks.append(_lyrics_track(song, arr, fb))
-            sub = _rhythm_arrangement(arr)
-            sl, assign, _ = place(sub, build_events(sub)[1], _F(num * 4, den))
-        else:
-            sl, assign, _ = place(arr, events, _F(num * 4, den))
-        start_m, text = gp_lyrics_line(sl, assign)
         song.lyrics = gp.Lyrics(trackChoice=len(song.tracks) if lyrics_track else 1,
-                                lines=[gp.LyricLine(start_m, text)] + [gp.LyricLine(1, "") for _ in range(4)])
-        texts.append(text)
+                                lines=[gp.LyricLine(m, t) for m, t in lines] +
+                                [gp.LyricLine(1, "") for _ in range(5 - len(lines))])
+        texts += [t for _, t in lines]
     from arpeggio.export.lyrics import gp_encoding
 
     path = Path(path)
