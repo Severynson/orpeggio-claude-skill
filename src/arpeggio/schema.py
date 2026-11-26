@@ -100,6 +100,7 @@ class Word(_Model):
     end: float
     confidence: float | None = None
     speaker: str | None = None
+    source: str | None = None  # merge-lyrics: matched | corrected | interpolated
 
 
 class LyricLine(_Model):
@@ -194,6 +195,14 @@ class ArrChord(_Model):
     beat: float = 0.0
 
 
+class ArrLyric(_Model):
+    text: str  # one sung word (or syllable)
+    measure: int
+    beat: float  # quarter notes from the start of the measure (sung onset)
+    line: int = 0  # lyric line index (for line breaks)
+    source: str | None = None  # aligned | matched | corrected | interpolated | retimed | manual
+
+
 class Section(_Model):
     name: str
     start_measure: int
@@ -217,6 +226,7 @@ class Arrangement(_Model):
     sections: list[Section] = Field(default_factory=list)
     chords: list[ArrChord] = Field(default_factory=list)
     notes: list[ArrNote] = Field(default_factory=list)
+    lyrics: list[ArrLyric] = Field(default_factory=list)  # sung words on the timeline (attach-lyrics)
     notes_text: str | None = None  # free-form arranger remarks
 
 

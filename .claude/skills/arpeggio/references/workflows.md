@@ -23,8 +23,11 @@ $ARP detect-expression song.mp3 $W/notes.json                    # optional: rea
 $ARP suggest-techniques $W/arrangement.json --expression $W/expression.json \
      --score $W/score.json --bar-offset 0          # review, then re-run with --apply safe
 $ARP validate-arrangement $W/arrangement.json
+# lyrics (default when the song has vocals): user text if given, else transcript
+$ARP sync-lyrics song.mp3 --text $W/user_lyrics.txt   # or: --language en (no text)
+$ARP attach-lyrics $W/arrangement.json $W/lyrics_synced.json --score $W/score.json --bar-offset 0
 $ARP render-tab $W/arrangement.json --measures 1-8
-$ARP export $W/arrangement.json --format gp5,pdf,musicxml,midi,ascii
+$ARP export $W/arrangement.json --format gp5,pdf,musicxml,midi,ascii   # --no-lyrics for a plain version
 ```
 
 Long song? Test perception on an excerpt first: `analyze-audio song.mp3

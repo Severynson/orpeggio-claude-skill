@@ -131,7 +131,7 @@ def _vibrato_direction(e, voice_no: int, staff: int) -> str:
     return ""
 
 
-def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True) -> Path:
+def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True, lyrics: bool = True) -> Path:
     from arpeggio.arrangement.techniques import expand_late_vibrato
 
     arr = expand_late_vibrato(arr)  # delayed vibrato = plain note tied to a vibrato note
@@ -139,6 +139,27 @@ def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True
     flats = prefers_flats(arr.key)
     num, _, den = arr.time_signature.partition("/")
     measure_count, events = build_events(arr)
+    lyric_at: dict[tuple[int, int, int], str] = {}  # (voice, measure, event index) -> words
+    line_end: set[tuple[int, int, int]] = set()
+    if lyrics and arr.lyrics:
+        from fractions import Fraction as _F
+
+        from arpeggio.export.lyrics import place
+
+        _num, _, _den = arr.time_signature.partition("/")
+        sl, assign, _ = place(arr, events, _F(int(_num) * 4, int(_den or 4)), voices=(1, 2))
+        keys = sorted(assign)
+        for a, b in zip(keys, keys[1:]):  # clitics ("с", "я", "на") ride with the next word
+            if len("".join(w.text for w in assign[a])) <= 2 and sl[b][0] - sl[a][0] <= _F(1, 2) \
+                    and assign[a][-1].line == assign[b][0].line:
+                assign[b] = assign.pop(a) + assign[b]
+        keys = sorted(assign)
+        for i, k in enumerate(keys):
+            _, m_, idx, v_, _s = sl[k]
+            lyric_at[(v_, m_, idx)] = " ".join(w.text for w in assign[k])
+            nxt = assign[keys[i + 1]][0].line if i + 1 < len(keys) else None
+            if nxt != assign[k][-1].line:
+                line_end.add((v_, m_, idx))
     origins = _legato_origins(arr)
     fifths, minor = key_fifths(arr.key)
     staves = 2 if include_tab else 1
@@ -193,7 +214,7 @@ def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True
                 out.append(f"<backup><duration>{mlen_div}</duration></backup>")
             first = False
             voice_no = v + (4 if staff == 2 else 0)
-            for e in evs:
+            for ei, e in enumerate(evs):
                 if staff == 1 and e.notes:
                     out.append(_vibrato_direction(e, voice_no, staff))
                 if e.chord and staff == 1 and (v == 1 or not any(x.onset == e.onset and x.chord for x in events[1].get(m, []))):
@@ -230,9 +251,16 @@ def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True
                     tech = f"<technical>{tech_all}</technical>" if tech_all else ""
                     body = tied + fx_other + tech
                     notations = f"<notations>{body}</notations>" if body else ""
+                    lyric = ""
+                    if i == 0 and staff == 1 and (v, m, ei) in lyric_at:
+                        # left-aligned + trailing no-break space: MuseScore does not avoid
+                        # collisions between lyrics of different voices
+                        lyric = (f'<lyric number="1" placement="below" justify="left"><syllabic>single</syllabic>'
+                                 f"<text>{escape(lyric_at[(v, m, ei)])}\u00a0</text>"
+                                 f"{'<end-line/>' if (v, m, ei) in line_end else ''}</lyric>")
                     out.append(f"<note>{chord_tag}{_pitch_xml(r.pitch, flats, False)}<duration>{dur}</duration>"
                                f"{ties}<voice>{voice_no}</voice><type>{typ}</type>{extra}{tm}{stem}"
-                               f"<staff>{staff}</staff>{notations}</note>")
+                               f"<staff>{staff}</staff>{notations}{lyric}</note>")
         if m == measure_count:
             out.append('<barline location="right"><bar-style>light-heavy</bar-style></barline>')
         out.append("</measure>")

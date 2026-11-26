@@ -16,6 +16,7 @@ Run `$ARP <command> --help` for every option.
 | `detect-chords AUDIO` | Chord segments (LV-Chordia; `--backend chroma` fallback) | `--vocabulary submission\|full\|extended`, `--min-duration` | `chords.json` |
 | `transcribe-lyrics AUDIO` | Words + timestamps (ElevenLabs Scribe) | `--language uk`, `--isolate-vocals` (Demucs first) | `lyrics.json` |
 | `align-lyrics AUDIO LYRICS.txt` | Forced alignment of known lyrics (keeps user text & line breaks) | `--isolate-vocals` | `lyrics.json` |
+| `sync-lyrics AUDIO [--text lyrics.txt]` | **Preferred lyrics command.** Timed lyrics for tabs. With `--text` (user's lyrics = trusted words): ElevenLabs forced alignment of the text + speech-to-text transcript merged word-by-word as a second opinion (misheard words replaced by the user's), then lines whose timing collapsed are moved into voice-active parts of the Demucs vocal stem. Without `--text`: transcript only | `--transcript lyrics.json` (reuse STT), `--method auto\|forced\|transcript`, `--language`, `--no-isolate-vocals` | `lyrics_synced.json` (words carry `source`: aligned/matched/corrected/interpolated/retimed); report lists `corrections`, `retimed_lines`, `unmatched_transcript` |
 | `separate AUDIO` | Demucs stems | `--stems all\|vocals\|bass\|drums\|guitar\|piano`, `--model htdemucs_6s` | WAV paths |
 
 MuScriptor instrument names: `voice acoustic_guitar clean_electric_guitar
@@ -60,6 +61,7 @@ Score compact format (`get-section score.json`):
 | `validate-arrangement ARR` | Errors/warnings/info with measure, beat and suggestion; full list in `<arr>.validation.json`. `--severity info` to see everything |
 | `render-tab ARR [--measures a-b]` | ASCII tab to stdout for review (`h5` hammer-on, `p0` pull-off, `/7` slide, `5~` vibrato, `5(~)` late vibrato, `7b` bend, `<12>` harmonic) |
 | `detect-expression AUDIO NOTES.json [--tracks ...]` | Measures real vibrato (rate Hz, depth cents) and bends of transcribed notes, by narrow-band tracking around each known pitch; masks notes whose band is polluted by other sounding notes. A stem (`separate`) gives cleaner evidence. Output `expression.json` |
+| `attach-lyrics ARR LYRICS.json --score score.json [--bar-offset N]` | Map timed words to the arrangement's bars/beats (stored in `lyrics`; exported with every format). `by_measure` preview to check sections |
 | `suggest-techniques ARR [--expression E --score S --bar-offset N] [--apply evidence\|safe\|all] [--min-confidence 0.5] [--density-bars 2] [--no-idiomatic] [--exclude slide,bend]` | Proposes techniques with `kind` (`evidence` / `idiomatic`), `confidence` and `reason`; never changes pitch or rhythm. Proposes `late_vibrato` when the bass moves under a long note. `--exclude` drops technique families the user doesn't want. Report in `<arr>.techniques.json`; `--apply` writes them into the arrangement. Needs tablature (run after `optimize-tablature`) |
 
 Validation codes: `unassigned`, `pitch_mismatch`, `out_of_range`,
@@ -76,5 +78,5 @@ span 4 / fret ≤12 / 4 notes; advanced span 5 / fret ≤17 / 6 notes.
 
 | Command | Output |
 |---|---|
-| `export ARR --format gp5,musicxml,midi,ascii,pdf\|all [-d DIR] [--name N]` | Files in `<arr dir>/export/`. GP5 is read back to verify. Refuses if validation has errors (`--force` to override). PDF = MuseScore engraving when installed, else typeset ASCII tab |
+| `export ARR --format gp5,musicxml,midi,ascii,pdf\|all [-d DIR] [--name N] [--no-lyrics] [--gp5-lyrics guitar\|track] [--gp5-encoding auto\|cp1251\|…]` | Files in `<arr dir>/export/`. GP5 is read back to verify. Refuses if validation has errors (`--force` to override). PDF = MuseScore engraving when installed, else typeset ASCII tab (lyrics transliterated). Lyrics: MusicXML/PDF on the nearest struck note of either voice; MIDI as lyric meta events at the sung onsets; ASCII as a row under the tab; GP5 on the guitar's voice-1 beats (Guitar Pro's rule — words group where the melody holds a note; `--gp5-lyrics track` adds a muted "Lyrics" rhythm track with exact timing, visible in multitrack view). GP5 has no Unicode: Cyrillic is written as cp1251 (`auto`) |
 | `export-chord-sheet chord_sheet.json --format text\|chordpro\|pdf` | Chord sheet files |

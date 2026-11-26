@@ -113,9 +113,10 @@ def align_lyrics(audio: str | Path, lyrics_text: str, isolate_vocals: bool = Fal
                  start: float | None = None, end: float | None = None,
                  device: str | None = None) -> Lyrics:
     """Forced alignment: keep the user's words and line breaks, add timestamps."""
+    from arpeggio.analysis.lyrics_merge import clean_lyrics_text, norm
+
     audio = Path(audio)
-    lines_in = [ln.strip() for ln in lyrics_text.splitlines()]
-    lines_in = [ln for ln in lines_in if ln and not _is_section_label(ln)]
+    lines_in = [ln for _, ln in clean_lyrics_text(lyrics_text) if not _is_section_label(ln)]
     if not lines_in:
         raise ArpeggioError("no lyric lines to align")
     src = _maybe_isolate(audio, isolate_vocals, device)
@@ -135,7 +136,7 @@ def align_lyrics(audio: str | Path, lyrics_text: str, isolate_vocals: bool = Fal
     i = 0
     for ln in lines_in:
         n = len(ln.split())
-        ws = aligned[i:i + n]
+        ws = [w for w in aligned[i:i + n] if norm(w.text)]  # drop sung-less tokens such as "—"
         i += n
         if ws:
             lines.append(LyricLine(text=ln, start=ws[0].start, end=ws[-1].end, words=ws))

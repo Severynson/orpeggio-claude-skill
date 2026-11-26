@@ -395,3 +395,76 @@ def test_late_vibrato_keeps_moving_bass(tmp_path: Path):
     pm = pretty_midi.PrettyMIDI(str(export_midi(arr, tmp_path / "l.mid")))
     bends = [p.time for i in pm.instruments for p in i.pitch_bends if p.pitch]
     assert bends and min(bends) >= 3 * 60 / 130 - 1e-3  # wobble starts on beat 4
+
+
+LYRICS_TEXT = """[Verse 1]
+Hello bright world
+You might also like
+Some Other Song
+[Chorus]
+Sing it loud
+"""
+
+
+def _stt(words):
+    from arpeggio.schema import LyricLine, Lyrics, Provenance, Source, Word
+
+    ws = [Word(text=t, start=a, end=b) for t, a, b in words]
+    return Lyrics(source=Source(path="x.wav"), provenance=Provenance(backend="elevenlabs"),
+                  lines=[LyricLine(text=" ".join(w.text for w in ws), start=ws[0].start, end=ws[-1].end, words=ws)])
+
+
+def test_lyrics_merge_prefers_user_text():
+    from arpeggio.analysis.lyrics_merge import clean_lyrics_text, merge_lyrics, retime_with_vocals
+
+    lines = clean_lyrics_text(LYRICS_TEXT)
+    assert [l for _, l in lines] == ["Hello bright world", "Sing it loud"]  # headers + site junk dropped
+    # misheard "bite" -> "bright", "word" -> "world"; "it" missing in the transcript
+    stt = _stt([("Hello", 1.0, 1.4), ("bite", 1.5, 1.9), ("word", 2.0, 2.6), ("Sing", 5.0, 5.3), ("loud", 5.9, 6.4)])
+    merged, rep = merge_lyrics(stt, LYRICS_TEXT)
+    words = [(w.text, w.start, w.source) for l in merged.lines for w in l.words]
+    assert [w[0] for w in words] == ["Hello", "bright", "world", "Sing", "it", "loud"]
+    assert words[1][1] == 1.5 and words[1][2] == "corrected" and words[2][1] == 2.0
+    assert words[4][2] == "interpolated" and 5.0 < words[4][1] < 5.9
+    assert rep["corrected"] >= 1 and rep["corrections"][0]["heard"] == "bite"
+    # a collapsed line (word lasting 40 s) moves into an unclaimed voice segment
+    bad = _stt([("Hello", 1.0, 1.4), ("bright", 1.5, 1.9), ("world", 2.0, 2.6), ("Sing", 5.0, 45.0),
+                ("it", 45.1, 45.3), ("loud", 45.4, 45.9)])
+    ws = bad.lines[0].words
+    bad.lines = [bad.lines[0].model_copy(update={"words": ws[:3], "start": 1.0, "end": 2.6}),
+                 bad.lines[0].model_copy(update={"words": ws[3:], "start": 5.0, "end": 45.9})]
+    fixed, changes = retime_with_vocals(bad, [(1.0, 2.7), (8.0, 9.5), (30.0, 30.5)])
+    assert changes and 8.0 <= fixed.lines[1].start < 8.6
+
+
+def test_lyrics_attach_and_export(tmp_path: Path):
+    import guitarpro
+    import pretty_midi
+
+    from arpeggio.arrangement.lyrics import attach_lyrics
+    from arpeggio.export.simple import export_midi
+    from arpeggio.schema import Score
+
+    arr, _ = optimize(from_text(
+        "M 1 C\n0 mel E4 1\n1 mel G4 1\n2 mel C5 2\n0 bass C3 4\n"
+        "M 2 G\n0 mel D5 1\n1 mel B4 3\n0 bass G2 2\n2 bass D3 2\n@tempo 120\n"))
+    score = Score(tempo_bpm=120, measure_starts=[10.0, 12.0, 14.0], measure_count=2)
+    ly = _stt([("Привет", 10.0, 10.4), ("мир", 10.5, 10.9), ("снова", 12.0, 12.4), ("здесь", 12.6, 13.0)])
+    arr, info = attach_lyrics(arr, ly, score, bar_offset=0)
+    assert info["words"] == 4 and [(w.measure, w.beat) for w in arr.lyrics][:2] == [(1, 0.0), (1, 1.0)]
+    # "здесь" at 12.6 s -> bar 2 beat 1.2, inside the held B4 (voice 1): GP joins it onto "снова"
+    p = export_gp5(arr, tmp_path / "l.gp5")
+    song = guitarpro.parse(str(p), encoding="cp1251")
+    assert song.lyrics.trackChoice == 1 and song.lyrics.lines[0].startingMeasure == 1
+    assert song.lyrics.lines[0].lyrics.split(" ")[:2] == ["Привет", "мир"]
+    p2 = export_gp5(arr, tmp_path / "t.gp5", lyrics_track=True)
+    s2 = guitarpro.parse(str(p2), encoding="cp1251")
+    assert len(s2.tracks) == 2 and s2.lyrics.trackChoice == 2
+    xml = export_musicxml(arr, tmp_path / "l.musicxml").read_text(encoding="utf-8")
+    assert xml.count("<lyric ") == 4 and "Привет" in xml
+    assert "<lyric" not in export_musicxml(arr, tmp_path / "n.musicxml", lyrics=False).read_text(encoding="utf-8")
+    pm = pretty_midi.PrettyMIDI(str(export_midi(arr, tmp_path / "l.mid")))
+    assert len(pm.lyrics) == 4 and abs(pm.lyrics[1].time - 0.5) < 1e-6
+    assert "Привет" in render_ascii(arr) and "Привет" not in render_ascii(arr, lyrics=False)
+    gp_plain = guitarpro.parse(str(export_gp5(arr, tmp_path / "p.gp5", lyrics=False)))
+    assert not gp_plain.lyrics.lines[0].lyrics

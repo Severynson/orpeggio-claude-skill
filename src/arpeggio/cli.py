@@ -218,6 +218,60 @@ def align_lyrics(
 
 
 @command
+def sync_lyrics(
+    audio: Path, output: Out = None,
+    text: Annotated[Optional[Path], typer.Option(
+        help="The user's lyrics (trusted words; [Section] headers and lyrics-site junk are stripped)")] = None,
+    transcript: Annotated[Optional[Path], typer.Option(
+        help="Reuse an existing transcribe-lyrics JSON instead of calling speech-to-text again")] = None,
+    method: Annotated[str, typer.Option(help="auto (forced alignment + transcript) | forced | transcript")] = "auto",
+    language: Annotated[Optional[str], typer.Option(help="ISO code for speech-to-text, e.g. ru, uk, en")] = None,
+    isolate_vocals: Annotated[bool, typer.Option(help="Demucs vocal stem for timing + voice-activity repair")] = True,
+    device: Optional[str] = None,
+):
+    """Timed lyrics for tabs: user text if given (always preferred), else ElevenLabs transcript.
+
+    With --text: forced alignment of the text, the speech-to-text transcript merged
+    word-by-word as a second opinion (misheard words replaced by the user's), and
+    lines with collapsed timing moved into voice-active parts of the vocal stem.
+    """
+    from arpeggio.analysis.lyrics_merge import sync_lyrics as run
+    from arpeggio.analysis.sections import summarize
+
+    if method not in ("auto", "forced", "transcript"):
+        raise ArpeggioError("--method must be auto, forced or transcript")
+    tr = load(transcript, "lyrics") if transcript else None
+    ly, rep = run(audio, text.read_text(encoding="utf-8") if text else None, tr, language=language,
+                  isolate_vocals=isolate_vocals, method=method, device=device)
+    out = save(ly, _out(output, audio, "lyrics_synced.json" if text else "lyrics.json"))
+    sources = {}
+    for ln in ly.lines:
+        for w in ln.words:
+            sources[w.source or "transcript"] = sources.get(w.source or "transcript", 0) + 1
+    emit({"output": str(out), "word_sources": sources, **rep, **summarize(ly)})
+
+
+@command
+def attach_lyrics(
+    arrangement: Path,
+    lyrics: Annotated[Path, typer.Argument(help="Timed lyrics JSON (sync-lyrics / transcribe-lyrics / align-lyrics)")],
+    score: Annotated[Path, typer.Option(help="score.json whose measure_starts map seconds to bars")],
+    bar_offset: Annotated[int, typer.Option(help="recording bar = arrangement bar + offset")] = 0,
+    output: Out = None,
+):
+    """Put timed lyrics onto the arrangement's bars/beats (exported with every format)."""
+    from arpeggio.arrangement.lyrics import attach_lyrics as run
+
+    arr, info = run(load(arrangement, "arrangement"), load(lyrics, "lyrics"), load(score, "score"), bar_offset)
+    out = save(arr, output or arrangement)
+    preview = {}
+    for w in arr.lyrics:
+        preview.setdefault(w.measure, []).append(w.text)
+    emit({"output": str(out), **info,
+          "by_measure": {m: " ".join(ws) for m, ws in list(preview.items())[:40]}})
+
+
+@command
 def separate(
     audio: Path,
     stems: Annotated[str, typer.Option(help="all | vocals | bass | drums | other | guitar | piano")] = "all",
@@ -645,6 +699,11 @@ def export(
     output_dir: Annotated[Optional[Path], typer.Option("--output-dir", "-d")] = None,
     name: Annotated[Optional[str], typer.Option(help="Base file name")] = None,
     force: Annotated[bool, typer.Option(help="Export even if validation reports errors")] = False,
+    lyrics: Annotated[bool, typer.Option(help="Include the arrangement's lyrics (attach-lyrics) in all formats")] = True,
+    gp5_encoding: Annotated[str, typer.Option(help="GP5 text code page: auto | cp1251 | cp1252 | utf-8 …")] = "auto",
+    gp5_lyrics: Annotated[str, typer.Option(
+        help="guitar: lyrics under the guitar staff (approximate where the melody holds) | "
+             "track: extra muted Lyrics track with exact word rhythm")] = "guitar",
 ):
     """Export a (validated) arrangement to Guitar Pro, MusicXML, MIDI, ASCII tab, PDF."""
     from arpeggio.arrangement.validate import validate
@@ -663,20 +722,45 @@ def export(
     d.mkdir(parents=True, exist_ok=True)
     base = name or slugify(arr.title if arr.title != "Untitled" else arrangement.stem)
     files = {}
+    from arpeggio.export.lyrics import gp_encoding
+
+    extra: dict = {}
+    gp_texts = [arr.title, arr.artist, arr.arranger] + [x.name for x in arr.sections]
+    if lyrics and arr.lyrics:
+        from fractions import Fraction
+
+        from arpeggio.export.events import build_events
+        from arpeggio.export.lyrics import gp_lyrics_line, place
+
+        num, _, den = arr.time_signature.partition("/")
+        evs, ml = build_events(arr)[1], Fraction(int(num) * 4, int(den or 4))
+        sl, assign, stats = place(arr, evs, ml)
+        gp_texts.append(gp_lyrics_line(sl, assign)[1])
+        extra["lyrics"] = {"gp5": stats, "musicxml_pdf": place(arr, evs, ml, voices=(1, 2))[2],
+                           "midi": "exact sung onsets (lyric meta events)"}
+    elif arr.lyrics:
+        extra["lyrics"] = "excluded (--no-lyrics)"
+    enc = gp_encoding(gp_texts, gp5_encoding)
+    if enc not in ("cp1252", "utf-8"):
+        extra["gp5_encoding_note"] = (
+            f"GP5 text is {enc} (the format has no Unicode): Guitar Pro / Songsterr show it right on systems "
+            f"using that code page; in MuseScore set Preferences → Import → Guitar Pro character set to {enc}. "
+            "MusicXML, PDF and MIDI are Unicode.")
     if "gp5" in fmts:
-        p = export_gp5(arr, d / f"{base}.gp5")
-        files["gp5"] = {"path": str(p), "check": read_back(p)}
+        p = export_gp5(arr, d / f"{base}.gp5", lyrics=lyrics, encoding=enc, lyrics_track=gp5_lyrics == "track")
+        files["gp5"] = {"path": str(p), "encoding": enc, "check": read_back(p, enc)}
     if "musicxml" in fmts or "pdf" in fmts:
-        files["musicxml"] = str(export_musicxml(arr, d / f"{base}.musicxml"))
+        files["musicxml"] = str(export_musicxml(arr, d / f"{base}.musicxml", lyrics=lyrics))
     if "midi" in fmts:
-        files["midi"] = str(export_midi(arr, d / f"{base}.mid"))
+        files["midi"] = str(export_midi(arr, d / f"{base}.mid", lyrics=lyrics))
     if "ascii" in fmts:
         p = d / f"{base}.tab.txt"
-        p.write_text(render_ascii(arr), encoding="utf-8")
+        p.write_text(render_ascii(arr, lyrics=lyrics), encoding="utf-8")
         files["ascii"] = str(p)
     if "pdf" in fmts:
-        files["pdf"] = export_pdf(arr, d / f"{base}.pdf", files.get("musicxml"))
-    emit({"output_dir": str(d), "files": files, "validation": {k: v[k] for k in ("valid", "errors", "warnings")}})
+        files["pdf"] = export_pdf(arr, d / f"{base}.pdf", files.get("musicxml"), lyrics=lyrics)
+    emit({"output_dir": str(d), "files": files, **extra,
+          "validation": {k: v[k] for k in ("valid", "errors", "warnings")}})
 
 
 @command
@@ -684,11 +768,13 @@ def render_tab(
     arrangement: Path,
     measures: Annotated[Optional[str], typer.Option(help="e.g. 1-8")] = None,
     per_line: int = 4,
+    lyrics: Annotated[bool, typer.Option(help="Show attached lyrics under the tab")] = True,
 ):
     """Print ASCII tablature to stdout (quick look)."""
     from arpeggio.export.simple import render_ascii
 
-    sys.stdout.write(render_ascii(load(arrangement, "arrangement"), per_line, measures=_measures(measures)))
+    sys.stdout.write(render_ascii(load(arrangement, "arrangement"), per_line, measures=_measures(measures),
+                                  lyrics=lyrics))
 
 
 @command
