@@ -1,5 +1,7 @@
 # Arpeggio
 
+https://github.com/user-attachments/assets/2ba779f5-f2e7-486b-bba7-4a53dc337e66
+
 A composable musical-intelligence toolkit, exposed as a **Python CLI** with a
 **Claude Skill** on top (`.claude/skills/arpeggio/`). Claude orchestrates the
 tools and does the musical reasoning; Arpeggio provides perception, analysis,
