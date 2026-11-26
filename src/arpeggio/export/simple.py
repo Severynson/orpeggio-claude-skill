@@ -21,7 +21,9 @@ def export_midi(arr: Arrangement, path: str | Path, split_roles: bool = False,
 
     import pretty_midi
 
-    from arpeggio.arrangement.techniques import PITCH_EFFECTS, previous_on_string, tokens
+    from arpeggio.arrangement.techniques import PITCH_EFFECTS, late_vibrato_offset, previous_on_string, tokens
+
+    tab_notes = [m for m in arr.notes if m.string is not None]
 
     mlen = measure_quarters(arr.time_signature)
     spq = 60.0 / arr.tempo_bpm
@@ -79,14 +81,18 @@ def export_midi(arr: Arrangement, path: str | Path, split_roles: bool = False,
                 fall_t = start + 0.6 * (end - start)
                 for k in range(9):
                     bends.append((fall_t + rise * k / 8, amt * (1 - k / 8)))
-        if "vibrato" in fx or "wide_vibrato" in fx:
-            depth = 0.45 if "wide_vibrato" in fx else 0.22  # semitones, peak
-            rate = 5.5
-            v0 = start + min(0.25, 0.3 * (end - start))  # players start vibrato after the attack
+        if any(t in fx for t in ("vibrato", "wide_vibrato", "late_vibrato")):
+            # narrow and quick reads as "guitar"; slow, wide wobble over a drone reads as theremin
+            depth = 0.35 if "wide_vibrato" in fx else 0.15  # semitones, peak
+            rate = 6.2
+            if "late_vibrato" in fx:
+                v0 = start + late_vibrato_offset(n, tab_notes, mlen) * spq
+            else:  # players start vibrato after the attack, later on long notes
+                v0 = start + max(0.15, min(0.6, 0.35 * (end - start)))
             t = v0
             base = bends[-1][1] if bends else 0.0
             while t < end:
-                ramp = min(1.0, (t - v0) / 0.2)
+                ramp = min(1.0, (t - v0) / 0.25)
                 bends.append((t, base + depth * ramp * math.sin(2 * math.pi * rate * (t - v0))))
                 t += 0.02
         bends.append((end, 0.0))
@@ -123,6 +129,8 @@ def tab_mark(n) -> str:
         mark += "br"
     if "vibrato" in toks or "wide_vibrato" in toks:
         mark += "~"
+    elif "late_vibrato" in toks:
+        mark += "(~)"
     if "slide_out" in toks:
         mark += "\\"
     if "palm_mute" in toks:

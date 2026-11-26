@@ -360,3 +360,38 @@ def test_technique_checks_and_exports(tmp_path: Path):
 
     mid = pretty_midi.PrettyMIDI(str(export_midi(good, tmp_path / "t.mid")))
     assert sum(len(i.pitch_bends) for i in mid.instruments) > 20
+
+
+def test_late_vibrato_keeps_moving_bass(tmp_path: Path):
+    from arpeggio.arrangement import techniques as T
+    from arpeggio.export.simple import export_midi
+
+    src = ("M 1 G5\n0 bass G2:6/3 1\n0 mel A4:1/5 4\n1 bass G2:6/3 1\n2 bass A#2:5/1 1\n3 bass B2:5/2 1\n"
+           "M 2 G5\n0 bass G2:6/3 4\n0 mel G#4:1/4 1\n1 mel G#4:1/4 1\n@tempo 130\n")
+    arr, _ = optimize(from_text(src))
+    sugg = T.suggest(arr)
+    late = [s for s in sugg if s["measure"] == 1 and s["pitch"] == "A4"]
+    assert late and late[0]["technique"] == "late_vibrato" and late[0]["confidence"] >= 0.5
+    assert not T.suggest(arr, exclude={"vibrato"}) or all(
+        "vibrato" not in s["technique"] for s in T.suggest(arr, exclude={"vibrato"}))
+    T.apply(sugg, "safe")
+    before = sorted((n.measure, n.beat, n.pitch, n.duration) for n in arr.notes)
+    assert validate(arr)["errors"] == 0
+    a4 = next(n for n in arr.notes if name_to_midi(n.pitch) == 69)
+    assert T.late_vibrato_offset(a4, arr.notes, 4.0) == 3.0  # after the last bass change
+    # notation: plain dotted half tied to a quarter with vibrato; nothing else changes
+    exp = T.expand_late_vibrato(arr)
+    pieces = sorted((n.beat, n.duration, n.tie, n.technique) for n in exp.notes if name_to_midi(n.pitch) == 69)
+    assert pieces == [(0.0, 3.0, False, None), (3.0, 1.0, True, "vibrato")]
+    assert sorted((n.measure, n.beat, n.pitch, n.duration) for n in arr.notes) == before
+    import guitarpro
+
+    gpn = [n for m in guitarpro.parse(str(export_gp5(arr, tmp_path / "l.gp5"))).tracks[0].measures
+           for v in m.voices for b in v.beats for n in b.notes if n.string == 1]
+    assert [(n.type.name, n.effect.vibrato) for n in gpn[:2]] == [("normal", False), ("tie", True)]
+    assert "(~)" in render_ascii(arr)
+    import pretty_midi
+
+    pm = pretty_midi.PrettyMIDI(str(export_midi(arr, tmp_path / "l.mid")))
+    bends = [p.time for i in pm.instruments for p in i.pitch_bends if p.pitch]
+    assert bends and min(bends) >= 3 * 60 / 130 - 1e-3  # wobble starts on beat 4

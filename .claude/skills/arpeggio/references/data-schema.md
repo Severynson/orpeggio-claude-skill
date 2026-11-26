@@ -60,7 +60,8 @@ Symbols: `C Cm C7 Cmaj7 Cm7 Cdim Caug Csus2 Csus4 C6 Cm6 C9 Cadd9 Cm7b5 Cdim7 C/
 - `tuning`: name (`standard`, `drop_d`, `dadgad`, `open_g`, …) or list low→high
   (`["D2","A2","D3","G3","B3","E4"]`).
 - `technique`: one or more tokens joined by `+` (e.g. `h+vibrato`), describing how
-  *this* note is produced: `vibrato`, `wide_vibrato`, `bend` (whole tone),
+  *this* note is produced: `vibrato`, `wide_vibrato`, `late_vibrato` (straight
+  attack, wobble only after the last fretted note struck under it), `bend` (whole tone),
   `bend_half`, `bend_release`, `h` / `p` (hammer-on / pull-off **from the previous
   note on the same string**), `slide` (legato slide from the previous note on the
   same string), `slide_in`, `slide_out`, `harmonic`, `let_ring`, `palm_mute`,

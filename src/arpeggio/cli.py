@@ -561,6 +561,8 @@ def suggest_techniques(
     apply: Annotated[Optional[str], typer.Option(help="Apply: evidence | safe | all (default: only suggest)")] = None,
     min_confidence: Annotated[float, typer.Option(help="Threshold for --apply safe")] = 0.5,
     density_bars: Annotated[float, typer.Option(help="At most one idiomatic vibrato per N bars")] = 2.0,
+    exclude: Annotated[Optional[str], typer.Option(
+        help="Never suggest these, comma list: slide, bend, vibrato, legato, h, p, late_vibrato, …")] = None,
 ):
     """Suggest (and optionally apply) vibrato, bends, slides, hammer-ons/pull-offs.
 
@@ -576,7 +578,7 @@ def suggest_techniques(
     sc = load(score, "score") if score else None
     if expr and sc is None:
         raise ArpeggioError("--expression needs --score (to map bars to recording time)")
-    sugg = T.suggest(arr, expr, sc, bar_offset, idiomatic, density_bars)
+    sugg = T.suggest(arr, expr, sc, bar_offset, idiomatic, density_bars, set(_list(exclude) or []))
     applied = 0
     if apply:
         if apply not in ("evidence", "safe", "all"):

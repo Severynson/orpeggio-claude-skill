@@ -4,6 +4,9 @@ A note's `technique` field holds one or more tokens joined by "+"
 (e.g. "slide+vibrato"). Tokens describe how *this* note is produced:
 
 * vibrato, wide_vibrato    — pitch wobble on a held fretted note
+* late_vibrato             — straight attack, wobble only in the last part of a long note
+                             (after the accompaniment under it stops moving); exported as
+                             a tied note with vibrato on the tied part
 * bend, bend_half, bend_release — string bend up a whole / half tone (release = back down)
 * h, p                     — hammer-on / pull-off from the previous note on the same string
 * slide                    — slide from the previous note on the same string into this one
@@ -25,12 +28,13 @@ from arpeggio.schema import ArrNote, Arrangement
 from arpeggio.theory import midi_to_name, name_to_midi
 
 TOKENS = {
-    "vibrato", "wide_vibrato", "bend", "bend_half", "bend_release", "h", "p", "slide",
+    "vibrato", "wide_vibrato", "late_vibrato", "bend", "bend_half", "bend_release", "h", "p", "slide",
     "slide_in", "slide_out", "harmonic", "let_ring", "palm_mute", "staccato", "ghost", "accent",
 }
 ALIASES = {"hammer": "h", "pull": "p", "nh": "harmonic", "s": "slide", "~": "vibrato",
            "pm": "palm_mute", "vib": "vibrato", "b": "bend"}
-PITCH_EFFECTS = {"vibrato", "wide_vibrato", "bend", "bend_half", "bend_release"}
+VIBRATOS = {"vibrato", "wide_vibrato", "late_vibrato"}
+PITCH_EFFECTS = {"vibrato", "wide_vibrato", "late_vibrato", "bend", "bend_half", "bend_release"}
 LEGATO = {"h", "p", "slide"}
 
 
@@ -169,8 +173,79 @@ def hand_busy(n: ArrNote, notes: list[ArrNote], mlen: float, portion: float = 1.
     return False
 
 
+def late_vibrato_offset(n: ArrNote, notes: list[ArrNote], mlen: float) -> float:
+    """Quarters after the note's start where a late vibrato begins: after the last
+    fretted note struck under it (the hand is still from then on), at least halfway
+    through, and leaving at least half a beat to wobble."""
+    t0 = abs_beat(n, mlen)
+    last = 0.0
+    for m in notes:
+        if m is n or not m.fret or m.string == n.string:
+            continue
+        d = abs_beat(m, mlen) - t0
+        if 1e-6 < d < n.duration - 1e-6:
+            last = max(last, d)
+    off = max(last, n.duration / 2)
+    off = round(off * 4) / 4
+    return max(0.25, min(off, n.duration - 0.5)) if n.duration >= 1 else n.duration / 2
+
+
+def expand_late_vibrato(arr: Arrangement) -> Arrangement:
+    """Copy of `arr` where each late_vibrato note is split into a plain note tied to
+    a vibrato note (how delayed vibrato is written in tab/notation and Guitar Pro)."""
+    mlen = measure_quarters(arr.time_signature)
+    if not any("late_vibrato" in tokens(n) for n in arr.notes):
+        return arr
+    out = arr.model_copy(deep=True)
+    notes = [n for n in out.notes if n.string is not None]
+    new: list[ArrNote] = []
+    for n in out.notes:
+        toks = tokens(n)
+        if "late_vibrato" not in toks or n.duration < 0.75:
+            new.append(n)
+            continue
+        off = late_vibrato_offset(n, notes, mlen)
+        start = abs_beat(n, mlen) + off
+        rest = [t for t in toks if t != "late_vibrato"]
+        head = n.model_copy(update={"duration": off, "technique": "+".join(rest) or None})
+        m = int(start // mlen) + 1
+        tail_toks = [t for t in rest if t not in LEGATO and t not in ("slide_in", "accent", "ghost")]
+        tail = n.model_copy(update={"measure": m, "beat": round(start - (m - 1) * mlen, 4),
+                                    "duration": n.duration - off, "tie": True, "locked": True,
+                                    "technique": "+".join(tail_toks + ["vibrato"])})
+        new += [head, tail]
+    out.notes = new
+    return out
+
+
 def suggest(arr: Arrangement, expression: dict | None = None, score=None, bar_offset: int = 0,
-            idiomatic: bool = True, density_bars: float = 2.0) -> list[dict]:
+            idiomatic: bool = True, density_bars: float = 2.0,
+            exclude: set[str] | None = None) -> list[dict]:
+    """Propose techniques. `exclude` drops whole families, e.g. {"slide", "bend"}
+    ("vibrato" also drops wide/late vibrato, "bend" all bends, "legato" h/p/slide)."""
+    sugg = _suggest(arr, expression, score, bar_offset, idiomatic, density_bars)
+    if not exclude:
+        return sugg
+    fam = {"vibrato": VIBRATOS, "bend": {"bend", "bend_half", "bend_release"},
+           "legato": LEGATO, "hammer": {"h"}, "pull": {"p"}}
+    drop: set[str] = set()
+    for e in exclude:
+        e = ALIASES.get(e, e)
+        drop |= fam.get(e, {e})
+    return [s for s in sugg if s["technique"] not in drop]
+
+
+def _late_ok(n: ArrNote, notes: list[ArrNote], mlen: float, spq: float) -> bool:
+    """A late vibrato is playable when the hand is still for its last part (≥0.35 s)."""
+    off = late_vibrato_offset(n, notes, mlen)
+    t0 = abs_beat(n, mlen) + off
+    still = all(not (t0 + 1e-6 < abs_beat(m, mlen) < abs_beat(n, mlen) + n.duration - 1e-6)
+                for m in notes if m is not n and m.fret and m.string != n.string)
+    return still and (n.duration - off) * spq >= 0.35
+
+
+def _suggest(arr: Arrangement, expression: dict | None, score, bar_offset: int,
+             idiomatic: bool, density_bars: float) -> list[dict]:
     mlen = measure_quarters(arr.time_signature)
     spq = 60.0 / arr.tempo_bpm
     diff = DIFFICULTIES[arr.difficulty]
@@ -216,8 +291,12 @@ def suggest(arr: Arrangement, expression: dict | None = None, score=None, bar_of
                 conf = 0.5 + 0.5 * v.get("confidence", 0.5)
                 why = f"recording has {v['rate_hz']} Hz vibrato, ±{v['depth_cents']} cents"
                 if busy:
-                    conf, why = 0.4, why + "; fretted accompaniment moves under it — use open-string " \
-                        "bass or sustain the bass to make the vibrato playable"
+                    conf, why = 0.4, why + "; fretted accompaniment moves under it — " \
+                        "simplifying the accompaniment would be needed (not recommended: it changes the groove)"
+                if busy and tok == "vibrato" and _late_ok(n, notes, mlen, spq):
+                    tok, conf = "late_vibrato", 0.5 + 0.4 * v.get("confidence", 0.5)
+                    why = f"recording has {v['rate_hz']} Hz vibrato, ±{v['depth_cents']} cents; " \
+                        "the bass moves under it, so wobble only after the last bass change"
                 propose(n, tok, "evidence", conf, why)
             if "bend" in match and n.fret and n.string is not None and n.string <= 4 and not busy:
                 b = match["bend"]
@@ -249,20 +328,24 @@ def suggest(arr: Arrangement, expression: dict | None = None, score=None, bar_of
             score_ -= 0.2
         why = f"held {n.duration:g} beats ({sec:.1f}s) on a fretted string" + \
               (", phrase end" if gap >= 0.5 else "")
-        if busy:
+        tok = "vibrato"
+        if busy and _late_ok(n, notes, mlen, spq):
+            tok = "late_vibrato"
+            why += "; the bass moves under it, so wobble only after the last bass change"
+        elif busy:
             score_ = min(score_, 0.4)
             why += "; fretted accompaniment moves under it — playable only if simplified"
-        candidates.append((score_, n, why))
+        candidates.append((score_, n, why, tok))
     # density control: best candidates first, at most one per `density_bars` bars
     candidates.sort(key=lambda c: -c[0])
     taken: list[float] = []
     window = density_bars * mlen
-    for sc, n, why in candidates:
+    for sc, n, why, tok in candidates:
         t = abs_beat(n, mlen)
         if any(abs(t - x) < window for x in taken):
             continue
         taken.append(t)
-        propose(n, "vibrato", "idiomatic", min(0.85, sc), why)
+        propose(n, tok, "idiomatic", min(0.85, sc), why)
 
     # 3) Legato and slides between consecutive lead notes on the same string
     lead = [n for n in notes if n.role in lead_roles]

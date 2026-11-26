@@ -93,15 +93,24 @@ Goal: make the arrangement sound alive **without** damaging it. Order of trust:
      turns a position shift into a musical gesture;
    - *hammer-on / pull-off* for quick 1–3-semitone steps on one string with
      nothing else struck — smoother and easier than picking every note.
-3. **Guardrails** — a pitch effect needs a free fretting hand: if other fretted
-   notes start while the note rings, the suggestion gets confidence < 0.5.
-   Either simplify the accompaniment under it (sustain the bass, use an open
-   bass string) and accept it, or skip it. Never add bends to bass or chord tones.
+3. **Guardrails** — techniques decorate notes; they **never replace notes**.
+   - Never delete or simplify accompaniment (e.g. a walking bass) to make room
+     for an effect: it kills the groove and makes the bar feel slower. Tested on
+     a real song: removing a walking bass under a vibrato note made the section
+     boring and "sci-fi" sounding.
+   - A pitch effect needs a still fretting hand. If fretted notes are struck
+     under a long note, use **`late_vibrato`**: straight attack, wobble only after
+     the last bass change (exported as a note tied to a vibrato note). If the
+     hand never rests, the suggestion gets confidence < 0.5 — leave it plain.
+   - Never add bends to bass or chord tones.
+   - Respect the user's taste: `suggest-techniques --exclude slide,bend` (also
+     `vibrato`, `legato`, `h`, `p`, `late_vibrato`) when they don't want a gesture.
 
 Rules of taste: keep repeated sections consistent; prefer one well-placed
 vibrato over many; heavy/industrial material wants fewer, stronger gestures;
-classical guitar uses gentler (lateral) vibrato — prefer `vibrato` over
-`wide_vibrato`; beginners get legato only where it makes the part *easier*.
+long, even vibrato over a static drone sounds like a theremin — keep it
+narrow, quick and late; classical guitar uses gentler (lateral) vibrato — prefer
+`vibrato` over `wide_vibrato`; beginners get legato only where it makes the part *easier*.
 Exports: GP5 native effects, MusicXML (`vib.` text + TAB marks, slides, H/P
 slurs), ASCII symbols, and MIDI pitch-bend so the result can be auditioned.
 

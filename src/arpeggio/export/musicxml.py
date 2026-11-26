@@ -132,6 +132,9 @@ def _vibrato_direction(e, voice_no: int, staff: int) -> str:
 
 
 def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True) -> Path:
+    from arpeggio.arrangement.techniques import expand_late_vibrato
+
+    arr = expand_late_vibrato(arr)  # delayed vibrato = plain note tied to a vibrato note
     fb = Fretboard.from_spec(arr.tuning, 0, arr.instrument)
     flats = prefers_flats(arr.key)
     num, _, den = arr.time_signature.partition("/")

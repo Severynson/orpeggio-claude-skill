@@ -13,6 +13,9 @@ from arpeggio.theory import key_fifths, name_to_midi
 
 
 def export_gp5(arr: Arrangement, path: str | Path) -> Path:
+    from arpeggio.arrangement.techniques import expand_late_vibrato
+
+    arr = expand_late_vibrato(arr)  # delayed vibrato = plain note tied to a vibrato note
     fb = Fretboard.from_spec(arr.tuning, 0, arr.instrument)  # GP stores open tuning + capo offset
     num, _, den = arr.time_signature.partition("/")
     num, den = int(num), int(den or 4)
