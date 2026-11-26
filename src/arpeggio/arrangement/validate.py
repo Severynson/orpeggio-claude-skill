@@ -127,6 +127,9 @@ def validate(arr: Arrangement) -> dict:
         if empty:
             add("info", (empty[0], 0), "empty_measures", f"{len(empty)} empty measures: {_ranges(empty)}")
 
+    from arpeggio.arrangement.techniques import check_techniques
+
+    issues.extend(check_techniques(arr))
     counts = defaultdict(int)
     for i in issues:
         counts[i["severity"]] += 1

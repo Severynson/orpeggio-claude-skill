@@ -80,13 +80,39 @@ root–fifth bass on every beat + off-beat fills), `sparse` (bass on 1 only).
 - If a spot is unplayable: shorten held accompaniment, move a fill an octave,
   drop a harmony note, re-voice the chord, or move the melody an octave (whole phrase).
 
+## Expressive techniques (vibrato, bends, slides, legato)
+
+Goal: make the arrangement sound alive **without** damaging it. Order of trust:
+
+1. **Evidence** — `detect-expression` found the gesture in the recording on the
+   matching note (only lead roles are matched; accompaniment stays plain).
+2. **Idiom** — rules a guitarist would follow:
+   - *vibrato* on long (≥ 1.5 beats and ≥ 0.6 s), exposed, **fretted** lead notes,
+     best at phrase ends; never on open strings; at most ~1 per 2 bars;
+   - *slide* when the melody jumps 3–7 frets on the same string with no gap —
+     turns a position shift into a musical gesture;
+   - *hammer-on / pull-off* for quick 1–3-semitone steps on one string with
+     nothing else struck — smoother and easier than picking every note.
+3. **Guardrails** — a pitch effect needs a free fretting hand: if other fretted
+   notes start while the note rings, the suggestion gets confidence < 0.5.
+   Either simplify the accompaniment under it (sustain the bass, use an open
+   bass string) and accept it, or skip it. Never add bends to bass or chord tones.
+
+Rules of taste: keep repeated sections consistent; prefer one well-placed
+vibrato over many; heavy/industrial material wants fewer, stronger gestures;
+classical guitar uses gentler (lateral) vibrato — prefer `vibrato` over
+`wide_vibrato`; beginners get legato only where it makes the part *easier*.
+Exports: GP5 native effects, MusicXML (`vib.` text + TAB marks, slides, H/P
+slurs), ASCII symbols, and MIDI pitch-bend so the result can be auditioned.
+
 ## Iteration loop
 
 1. Draft or write a section in ATF (melody first, then bass, then fills).
 2. `optimize-tablature` → read `changes` (were melody notes moved? drops?).
 3. `validate-arrangement` → fix errors by changing the music, not by ignoring.
-4. `render-tab --measures …` → read like a guitarist (flow, shapes, melody on top).
-5. Repeat per section; keep repeats consistent. Then `export`.
+4. Optional: `suggest-techniques` → review → apply → validate again.
+5. `render-tab --measures …` → read like a guitarist (flow, shapes, melody on top).
+6. Repeat per section; keep repeats consistent. Then `export`.
 
 When you finish, tell the user: key/capo/tuning, difficulty, sections, main
 simplifications (e.g. "chorus melody up an octave", "riff reduced to bass +

@@ -78,9 +78,17 @@ priorities and playability rules. Outline:
 6. **Validate & revise** — `validate-arrangement arrangement.json`. Fix every
    `error` (and important warnings) by editing the musical content, then repeat
    5–6. Use `lock` in ATF to pin positions you chose deliberately.
-7. **Review** — `render-tab arrangement.json --measures 1-8` and read it as a
+7. **Expression** (optional, recommended for intermediate+) — read the
+   "Expressive techniques" section of `references/fingerstyle.md`.
+   `detect-expression song.mp3 notes.json` measures real vibrato/bends in the
+   recording; `suggest-techniques arrangement.json --expression expression.json
+   --score score.json --bar-offset N` proposes vibrato, bends, slides,
+   hammer-ons/pull-offs with reasons and confidence. Review them, apply with
+   `--apply safe` (or edit `tech=` in ATF), then validate again. Low-confidence
+   suggestions usually mean "nice, but simplify the accompaniment first".
+8. **Review** — `render-tab arrangement.json --measures 1-8` and read it as a
    guitarist: is the melody audible and recognisable, are shapes idiomatic?
-8. **Export** — `$ARP export arrangement.json --format gp5,pdf,musicxml,midi,ascii`.
+9. **Export** — `$ARP export arrangement.json --format gp5,pdf,musicxml,midi,ascii`.
    Report file paths, key/capo/tuning, difficulty, and any compromises you made.
 
 ## Other workflows (see `references/workflows.md`)

@@ -50,11 +50,93 @@ def _harmony(symbol: str) -> str:
             f'<kind text="{text}">{kind}</kind>{bass}</harmony>')
 
 
+def _legato_origins(arr: Arrangement) -> dict[int, set[str]]:
+    """id(origin note) -> legato kinds starting on it (h/p/slide marked on the target)."""
+    from arpeggio.arrangement.tablature import measure_quarters
+    from arpeggio.arrangement.techniques import previous_on_string, tokens
+
+    mlen = measure_quarters(arr.time_signature)
+    out: dict[int, set[str]] = {}
+    for n in arr.notes:
+        toks = tokens(n)
+        kinds = {t for t in toks if t in ("h", "p", "slide")}
+        if not kinds:
+            continue
+        prev = previous_on_string(arr.notes, n, mlen)
+        if prev is not None:
+            out.setdefault(id(prev), set()).update(kinds)
+    return out
+
+
+def _technique_xml(n, ref, origins) -> tuple[str, str]:
+    """(inside <technical>, other <notations> children) for one note piece."""
+    from arpeggio.arrangement.techniques import tokens
+
+    toks = tokens(n)
+    tech, other = "", ""
+    first_piece = not ref.tie_from_prev or n.tie
+    last_piece = not ref.tie_to_next
+    if last_piece:
+        for k in sorted(origins.get(id(n), ())):
+            if k == "h":
+                tech += '<hammer-on type="start">H</hammer-on>'
+                other += '<slur type="start" number="2"/>'
+            elif k == "p":
+                tech += '<pull-off type="start">P</pull-off>'
+                other += '<slur type="start" number="2"/>'
+            elif k == "slide":
+                other += '<slide type="start" line-type="solid"/>'
+    if first_piece:
+        if "h" in toks:
+            tech += '<hammer-on type="stop"/>'
+        if "p" in toks:
+            tech += '<pull-off type="stop"/>'
+        if "h" in toks or "p" in toks:
+            other += '<slur type="stop" number="2"/>'
+        if "slide" in toks:
+            other += '<slide type="stop" line-type="solid"/>'
+        for t, alter in (("bend", 2), ("bend_half", 1), ("bend_release", 2)):
+            if t in toks:
+                tech += f"<bend><bend-alter>{alter}</bend-alter></bend>"
+                if t == "bend_release":
+                    tech += "<bend><bend-alter>0</bend-alter><release/></bend>"
+        if "harmonic" in toks:
+            tech += "<harmonic><natural/></harmonic>"
+        if "palm_mute" in toks:
+            tech += "<other-technical>P.M.</other-technical>"
+        arts = ""
+        if "staccato" in toks:
+            arts += "<staccato/>"
+        if "accent" in toks:
+            arts += "<accent/>"
+        if arts:
+            other += f"<articulations>{arts}</articulations>"
+    # Vibrato: MuseScore imports <wavy-line> as a trill, so we mark it the way
+    # many guitar editions do — "vib." text above the staff (see _vibrato_direction)
+    # and a "~" next to the fret number on the TAB staff.
+    if ("vibrato" in toks or "wide_vibrato" in toks) and first_piece and n.string is not None:
+        tech += f"<other-technical>{'~~' if 'wide_vibrato' in toks else '~'}</other-technical>"
+    return tech, other
+
+
+def _vibrato_direction(e, voice_no: int, staff: int) -> str:
+    from arpeggio.arrangement.techniques import tokens
+
+    for r in e.notes:
+        toks = tokens(r.note)
+        if ("vibrato" in toks or "wide_vibrato" in toks) and (not r.tie_from_prev or r.note.tie):
+            word = "wide vib." if "wide_vibrato" in toks else "vib."
+            return (f'<direction placement="above"><direction-type><words font-style="italic">{word}</words>'
+                    f"</direction-type><voice>{voice_no}</voice><staff>{staff}</staff></direction>")
+    return ""
+
+
 def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True) -> Path:
     fb = Fretboard.from_spec(arr.tuning, 0, arr.instrument)
     flats = prefers_flats(arr.key)
     num, _, den = arr.time_signature.partition("/")
     measure_count, events = build_events(arr)
+    origins = _legato_origins(arr)
     fifths, minor = key_fifths(arr.key)
     staves = 2 if include_tab else 1
     out = ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -109,6 +191,8 @@ def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True
             first = False
             voice_no = v + (4 if staff == 2 else 0)
             for e in evs:
+                if staff == 1 and e.notes:
+                    out.append(_vibrato_direction(e, voice_no, staff))
                 if e.chord and staff == 1 and (v == 1 or not any(x.onset == e.onset and x.chord for x in events[1].get(m, []))):
                     out.append(_harmony(e.chord))
                 dur = int(e.duration * DIV)
@@ -132,13 +216,17 @@ def export_musicxml(arr: Arrangement, path: str | Path, include_tab: bool = True
                     if r.tie_to_next:
                         ties += '<tie type="start"/>'
                         tied += '<tied type="start"/>'
-                    tech = ""
                     n = r.note
+                    tech_inner = ""
                     if staff == (2 if include_tab else 1) and n.string is not None and n.fret is not None \
                             and n.string not in seen_strings:
                         seen_strings.add(n.string)
-                        tech = f"<technical><string>{n.string}</string><fret>{n.fret}</fret></technical>"
-                    notations = f"<notations>{tied}{tech}</notations>" if (tied or tech) else ""
+                        tech_inner = f"<string>{n.string}</string><fret>{n.fret}</fret>"
+                    fx_tech, fx_other = _technique_xml(n, r, origins)
+                    tech_all = tech_inner + fx_tech
+                    tech = f"<technical>{tech_all}</technical>" if tech_all else ""
+                    body = tied + fx_other + tech
+                    notations = f"<notations>{body}</notations>" if body else ""
                     out.append(f"<note>{chord_tag}{_pitch_xml(r.pitch, flats, False)}<duration>{dur}</duration>"
                                f"{ties}<voice>{voice_no}</voice><type>{typ}</type>{extra}{tm}{stem}"
                                f"<staff>{staff}</staff>{notations}</note>")

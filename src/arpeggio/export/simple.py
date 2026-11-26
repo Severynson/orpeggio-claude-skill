@@ -13,8 +13,15 @@ from arpeggio.schema import Arrangement
 from arpeggio.theory import midi_to_name, name_to_midi
 
 
-def export_midi(arr: Arrangement, path: str | Path, split_roles: bool = False) -> Path:
+def export_midi(arr: Arrangement, path: str | Path, split_roles: bool = False,
+                render_effects: bool = True) -> Path:
+    """Write MIDI. Vibrato, bends and slides are rendered with pitch-bend messages
+    on separate channels (pitch bend is per-channel), so they are audible."""
+    import math
+
     import pretty_midi
+
+    from arpeggio.arrangement.techniques import PITCH_EFFECTS, previous_on_string, tokens
 
     mlen = measure_quarters(arr.time_signature)
     spq = 60.0 / arr.tempo_bpm
@@ -23,17 +30,104 @@ def export_midi(arr: Arrangement, path: str | Path, split_roles: bool = False) -
     pm.time_signature_changes.append(pretty_midi.TimeSignature(int(num), int(den or 4), 0))
     program = MIDI_PROGRAMS.get(arr.instrument, 25)
     insts = {}
-    for n in arr.notes:
-        key = n.role if split_roles else "all"
-        if key not in insts:
-            insts[key] = pretty_midi.Instrument(program=program, name=f"{arr.instrument} {key}".strip())
+    fx_channels: list = []  # instruments used for effect notes, reused when free
+    BEND_RANGE = 2.0  # semitones (GM default)
+
+    def bend_value(semitones: float) -> int:
+        return int(max(-8192, min(8191, round(semitones / BEND_RANGE * 8191))))
+
+    for n in sorted(arr.notes, key=lambda x: abs_beat(x, mlen)):
         start = abs_beat(n, mlen) * spq
+        end = start + n.duration * spq
         vel = 92 if n.role == "melody" else 72 if n.role == "bass" else 60
-        insts[key].notes.append(pretty_midi.Note(velocity=vel, pitch=name_to_midi(n.pitch),
-                                                 start=start, end=start + n.duration * spq))
+        pitch = name_to_midi(n.pitch)
+        toks = tokens(n) if render_effects else []
+        fx = [t for t in toks if t in PITCH_EFFECTS or t == "slide"]
+        if "ghost" in toks:
+            vel = 35
+        if "accent" in toks:
+            vel = min(127, vel + 20)
+        if "staccato" in toks or "palm_mute" in toks:
+            end = start + min(n.duration * spq, 0.12 if "palm_mute" in toks else 0.5 * n.duration * spq)
+        if not fx:
+            key = n.role if split_roles else "all"
+            if key not in insts:
+                insts[key] = pretty_midi.Instrument(program=program, name=f"{arr.instrument} {key}".strip())
+            insts[key].notes.append(pretty_midi.Note(velocity=vel, pitch=pitch, start=start, end=end))
+            continue
+        inst = next((i for i in fx_channels if i._busy_until <= start), None)
+        if inst is None:
+            inst = pretty_midi.Instrument(program=program, name=f"{arr.instrument} fx{len(fx_channels) + 1}")
+            inst._busy_until = 0.0
+            fx_channels.append(inst)
+        inst._busy_until = end + 0.05
+        bends = []
+        if "slide" in fx:  # glide in from the previous note on the string
+            prev = previous_on_string(arr.notes, n, mlen)
+            if prev is not None:
+                d = name_to_midi(prev.pitch) - pitch
+                d = max(-BEND_RANGE, min(BEND_RANGE, d))
+                glide = min(0.09, 0.4 * (end - start))
+                for k in range(7):
+                    bends.append((start + glide * k / 6, d * (1 - k / 6)))
+        if any(t in fx for t in ("bend", "bend_half", "bend_release")):
+            amt = 1.0 if "bend_half" in fx else 2.0
+            rise = min(0.15, 0.3 * (end - start))
+            for k in range(9):
+                bends.append((start + rise * k / 8, amt * k / 8))
+            if "bend_release" in fx:
+                fall_t = start + 0.6 * (end - start)
+                for k in range(9):
+                    bends.append((fall_t + rise * k / 8, amt * (1 - k / 8)))
+        if "vibrato" in fx or "wide_vibrato" in fx:
+            depth = 0.45 if "wide_vibrato" in fx else 0.22  # semitones, peak
+            rate = 5.5
+            v0 = start + min(0.25, 0.3 * (end - start))  # players start vibrato after the attack
+            t = v0
+            base = bends[-1][1] if bends else 0.0
+            while t < end:
+                ramp = min(1.0, (t - v0) / 0.2)
+                bends.append((t, base + depth * ramp * math.sin(2 * math.pi * rate * (t - v0))))
+                t += 0.02
+        bends.append((end, 0.0))
+        inst.notes.append(pretty_midi.Note(velocity=vel, pitch=pitch, start=start, end=end))
+        for tb, semi in sorted(bends):
+            inst.pitch_bends.append(pretty_midi.PitchBend(bend_value(semi), tb))
     pm.instruments.extend(insts.values())
+    pm.instruments.extend(fx_channels)
+    if len(pm.instruments) > 15:
+        raise ValueError("too many simultaneous effect notes for MIDI channels")
     pm.write(str(path))
     return Path(path)
+
+
+def tab_mark(n) -> str:
+    """Fret number decorated with technique symbols (common tab conventions)."""
+    from arpeggio.arrangement.techniques import tokens
+
+    toks = tokens(n)
+    mark = str(n.fret)
+    if "harmonic" in toks:
+        mark = f"<{n.fret}>"
+    if "h" in toks:
+        mark = "h" + mark
+    elif "p" in toks:
+        mark = "p" + mark
+    elif "slide" in toks:
+        mark = "/" + mark
+    if "slide_in" in toks:
+        mark = "/" + mark
+    if "bend" in toks or "bend_half" in toks:
+        mark += "b"
+    if "bend_release" in toks:
+        mark += "br"
+    if "vibrato" in toks or "wide_vibrato" in toks:
+        mark += "~"
+    if "slide_out" in toks:
+        mark += "\\"
+    if "palm_mute" in toks:
+        mark = "PM" + mark
+    return mark
 
 
 def render_ascii(arr: Arrangement, measures_per_line: int = 4, steps_per_quarter: int = 4,
@@ -56,16 +150,7 @@ def render_ascii(arr: Arrangement, measures_per_line: int = 4, steps_per_quarter
             if n.measure != m or n.string is None or n.fret is None:
                 continue
             c = min(steps - 1, int(round(n.beat * steps_per_quarter)))
-            mark = str(n.fret)
-            tech = (n.technique or "").lower()
-            if tech in ("harmonic", "nh"):
-                mark = f"<{n.fret}>"
-            elif tech in ("h", "hammer"):
-                mark = f"h{n.fret}"
-            elif tech in ("p", "pull"):
-                mark = f"p{n.fret}"
-            elif tech in ("slide", "s"):
-                mark = f"/{n.fret}"
+            mark = tab_mark(n)
             cols[c][n.string] = mark
         widths = [max([1] + [len(v) for v in col.values()]) + 1 for col in cols]
         rows = []
