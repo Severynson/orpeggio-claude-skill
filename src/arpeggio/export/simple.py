@@ -14,7 +14,7 @@ from arpeggio.theory import midi_to_name, name_to_midi
 
 
 def export_midi(arr: Arrangement, path: str | Path, split_roles: bool = False,
-                render_effects: bool = True) -> Path:
+                render_effects: bool = True, lyrics: bool = True) -> Path:
     """Write MIDI. Vibrato, bends and slides are rendered with pitch-bend messages
     on separate channels (pitch bend is per-channel), so they are audible."""
     import math
@@ -101,6 +101,12 @@ def export_midi(arr: Arrangement, path: str | Path, split_roles: bool = False,
             inst.pitch_bends.append(pretty_midi.PitchBend(bend_value(semi), tb))
     pm.instruments.extend(insts.values())
     pm.instruments.extend(fx_channels)
+    if lyrics and arr.lyrics:
+        # Lyric meta events at the sung onsets (karaoke players, DAWs, MuseScore).
+        # mido writes text as latin-1; smuggle UTF-8 bytes through so any script survives.
+        for w in arr.lyrics:
+            t = ((w.measure - 1) * mlen + w.beat) * spq
+            pm.lyrics.append(pretty_midi.Lyric(w.text.encode("utf-8").decode("latin-1") + " ", t))
     if len(pm.instruments) > 15:
         raise ValueError("too many simultaneous effect notes for MIDI channels")
     pm.write(str(path))
@@ -138,8 +144,41 @@ def tab_mark(n) -> str:
     return mark
 
 
+def _lyric_row(arr, block_ms, blocks, width, steps, spq_steps) -> str:
+    """Words under the tab, starting at the column of their sung onset."""
+    x = width + 1
+    starts = {}
+    for m, (rows, _) in zip(block_ms, blocks):
+        starts[m] = x
+        x += len(rows[0]) + 1
+    line = [" "] * (x + 40)
+    cursor = 0
+    for w in sorted((w for w in arr.lyrics if w.measure in starts), key=lambda w: (w.measure, w.beat)):
+        rows = blocks[block_ms.index(w.measure)][0]
+        # column of the onset: rebuild the step -> char offset of that measure
+        c = min(steps - 1, int(round(w.beat * spq_steps)))
+        offs = _step_offsets(arr, w.measure, steps, spq_steps)
+        pos = max(cursor, starts[w.measure] + offs[c])
+        txt = w.text
+        if pos + len(txt) + 1 > len(line):
+            line += [" "] * (pos + len(txt) + 2 - len(line))
+        line[pos:pos + len(txt)] = list(txt)
+        cursor = pos + len(txt) + 1
+    return "".join(line).rstrip()
+
+
+def _step_offsets(arr, m, steps, spq_steps) -> list[int]:
+    widths = [1] * steps
+    for n in arr.notes:
+        if n.measure == m and n.string is not None and n.fret is not None:
+            c = min(steps - 1, int(round(n.beat * spq_steps)))
+            widths[c] = max(widths[c], len(tab_mark(n)))
+    widths = [w + 1 for w in widths]
+    return [sum(widths[:i]) for i in range(steps)]
+
+
 def render_ascii(arr: Arrangement, measures_per_line: int = 4, steps_per_quarter: int = 4,
-                 measures: tuple[int, int] | None = None) -> str:
+                 measures: tuple[int, int] | None = None, lyrics: bool = True) -> str:
     fb = Fretboard.from_spec(arr.tuning, arr.capo, arr.instrument)
     mlen = measure_quarters(arr.time_signature)
     steps = int(round(mlen * steps_per_quarter))
@@ -198,6 +237,8 @@ def render_ascii(arr: Arrangement, measures_per_line: int = 4, steps_per_quarter
             out.append(chord_line.rstrip())
         for si in range(fb.n_strings):
             out.append(labels[si] + "|" + "|".join(rows[si] for rows, _ in blocks) + "|")
+        if lyrics and arr.lyrics:
+            out.append(_lyric_row(arr, block_ms, blocks, width, steps, steps_per_quarter))
         out.append("")
     return "\n".join(out) + "\n"
 
@@ -225,7 +266,27 @@ def find_musescore() -> str | None:
     return None
 
 
-def export_pdf(arr: Arrangement, path: str | Path, musicxml_path: str | Path | None = None) -> dict:
+_TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюяіїєґ",
+                     ["a", "b", "v", "g", "d", "e", "yo", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
+                      "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "shch", "", "y", "'", "e", "yu", "ya",
+                      "i", "yi", "ye", "g"]))
+
+
+def translit(text: str) -> str:
+    """Latin transliteration for the base-14-font PDF fallback (no Cyrillic glyphs)."""
+    out = []
+    for ch in text:
+        low = ch.lower()
+        if low in _TRANSLIT:
+            t = _TRANSLIT[low]
+            out.append(t.capitalize() if ch != low else t)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def export_pdf(arr: Arrangement, path: str | Path, musicxml_path: str | Path | None = None,
+               lyrics: bool = True) -> dict:
     """Engrave with MuseScore if available, else typeset the ASCII tab as a PDF."""
     path = Path(path)
     ms = find_musescore()
@@ -234,15 +295,15 @@ def export_pdf(arr: Arrangement, path: str | Path, musicxml_path: str | Path | N
 
         xml = Path(musicxml_path) if musicxml_path else path.with_suffix(".musicxml")
         if not xml.exists():
-            export_musicxml(arr, xml)
+            export_musicxml(arr, xml, lyrics=lyrics)
         r = subprocess.run([ms, "-o", str(path), str(xml)], capture_output=True, text=True, timeout=600)
         if r.returncode == 0 and path.exists():
             return {"path": str(path), "engine": "musescore", "musescore": ms}
         fallback_reason = f"MuseScore failed: {r.stderr[-300:]}"
     else:
         fallback_reason = "MuseScore not found (install MuseScore 4 or set ARPEGGIO_MUSESCORE)"
-    text = render_ascii(arr, measures_per_line=3)
-    write_text_pdf(text, path, title=arr.title)
+    text = render_ascii(arr, measures_per_line=3, lyrics=lyrics)
+    write_text_pdf(translit(text), path, title=translit(arr.title))
     return {"path": str(path), "engine": "ascii-tab", "note": fallback_reason}
 
 

@@ -43,10 +43,10 @@ data/test/song.mp3 and export Guitar Pro + PDF."*
 
 | Group | Commands |
 |---|---|
-| Perception | `analyze-audio`, `transcribe-notes`, `detect-rhythm`, `detect-chords`, `transcribe-lyrics`, `align-lyrics`, `separate`, `detect-expression` |
+| Perception | `analyze-audio`, `transcribe-notes`, `detect-rhythm`, `detect-chords`, `sync-lyrics`, `transcribe-lyrics`, `align-lyrics`, `separate`, `detect-expression` |
 | Analysis | `quantize`, `extract-voices`, `analyze-harmony`, `summary`, `get-section`, `align-chords-lyrics`, `parse-chord-sheet` |
-| Arrangement | `arrange-draft`, `suggest-techniques`, `import-arrangement`, `export-text`, `patch-arrangement`, `transpose`, `suggest-key`, `chord-voicings`, `list-tunings`, `optimize-tablature`, `validate-arrangement`, `render-tab` |
-| Export | `export --format gp5,musicxml,midi,ascii,pdf`, `export-chord-sheet` |
+| Arrangement | `arrange-draft`, `suggest-techniques`, `attach-lyrics`, `import-arrangement`, `export-text`, `patch-arrangement`, `transpose`, `suggest-key`, `chord-voicings`, `list-tunings`, `optimize-tablature`, `validate-arrangement`, `render-tab` |
+| Export | `export --format gp5,musicxml,midi,ascii,pdf [--no-lyrics]`, `export-chord-sheet` |
 
 Details: [`.claude/skills/arpeggio/references/commands.md`](.claude/skills/arpeggio/references/commands.md),
 data formats and the compact arrangement text format (ATF):

@@ -95,6 +95,9 @@ def to_text(arr: Arrangement, measures: tuple[int, int] | None = None,
         cs = sorted(chords_by_m.get(m, []), key=lambda c: c.beat)
         ctext = " ".join(c.chord if c.beat == 0 else f"{c.chord}@{_fmt_num(c.beat)}" for c in cs)
         out.append(f"M {m} {ctext}".rstrip())
+        words = [w for w in arr.lyrics if w.measure == m]
+        if words:  # read-only: lyrics live in the JSON (attach-lyrics), comments are ignored on import
+            out.append("# lyrics: " + " ".join(f"{_fmt_num(round(w.beat, 2))}:{w.text}" for w in words))
         groups: dict[tuple, list[ArrNote]] = {}
         for n in sorted(by_m.get(m, []), key=lambda n: (n.beat, _role_order(n.role), _pitch(n))):
             key = (n.beat, n.role, n.duration, n.voice, n.locked, n.tie, n.technique, n.finger)

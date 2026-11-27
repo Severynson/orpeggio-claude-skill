@@ -53,6 +53,8 @@ Symbols: `C Cm C7 Cmaj7 Cm7 Cdim Caug Csus2 Csus4 C6 Cm6 C9 Cadd9 Cm7b5 Cdim7 C/
  "notes":[{"pitch":"E4","measure":1,"beat":0,"duration":1,"role":"melody",
            "string":1,"fret":0,"locked":false,"voice":1,"technique":null}]}
 ```
+- `lyrics` (optional, from `attach-lyrics`): `[{"text":"Они","measure":11,"beat":1.1,"line":0,"source":"aligned"}]`
+  — one sung word per entry at its sung onset; `line` groups words into lyric lines.
 - `role`: `melody` | `bass` | `harmony` | `counter` | `percussive`.
   Repair priority (what the optimiser sacrifices first): harmony → counter → bass → melody.
 - `voice`: notation voice; default melody/counter → 1 (stems up), bass/harmony → 2.
@@ -107,4 +109,5 @@ M 1 Am | F@2
 - Notes held across a barline: write the note in its own measure with the full
   duration (e.g. beat 3, duration 2); exporters split and tie it.
 - When patching, include **every** note of each measure you send — measures in
-  the section file replace the old ones entirely.
+  the section file replace the old ones entirely. Lyrics are not part of ATF
+  (`export-text` shows them as `# lyrics:` comments); patching keeps them.

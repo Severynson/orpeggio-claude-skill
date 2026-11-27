@@ -12,10 +12,23 @@ from arpeggio.schema import Arrangement
 from arpeggio.theory import key_fifths, name_to_midi
 
 
-def export_gp5(arr: Arrangement, path: str | Path) -> Path:
+def export_gp5(arr: Arrangement, path: str | Path, lyrics: bool = True, encoding: str = "auto",
+               lyrics_track: bool = False) -> Path:
+    """Guitar Pro 5 file. `lyrics`: write the arrangement's lyrics as the track's
+    lyric line, one word per struck voice-1 beat. `encoding`: 8-bit code page for
+    all text (auto = cp1252, or e.g. cp1251 when the text is Cyrillic).
+    `lyrics_track`: put the lyrics on an extra muted "Lyrics" track with one
+    rhythm note (x) per sung word — exact timing, shown in multitrack view —
+    instead of on the guitar's melody voice (approximate where it holds notes)."""
     from arpeggio.arrangement.techniques import expand_late_vibrato
 
     arr = expand_late_vibrato(arr)  # delayed vibrato = plain note tied to a vibrato note
+    plan = None
+    if lyrics and arr.lyrics:
+        from arpeggio.export.lyrics import gp_plan
+
+        plan = gp_plan(arr, lyrics_track)
+        arr = plan[0]  # guitar mode: voice 1 anchored under the sung words
     fb = Fretboard.from_spec(arr.tuning, 0, arr.instrument)  # GP stores open tuning + capo offset
     num, _, den = arr.time_signature.partition("/")
     num, den = int(num), int(den or 4)
@@ -83,8 +96,27 @@ def export_gp5(arr: Arrangement, path: str | Path) -> Path:
                     beat.status = gp.BeatStatus.rest
                 voice.beats.append(beat)
     _origin_effects(arr, pieces)
+    texts = [arr.title, arr.artist, arr.arranger] + [s.name for s in arr.sections]
+    if plan is not None:
+        lines = plan[3]
+        if lyrics_track:
+            song.tracks.append(_lyrics_track(song, arr, fb))
+        song.lyrics = gp.Lyrics(trackChoice=len(song.tracks) if lyrics_track else 1,
+                                lines=[gp.LyricLine(m, t) for m, t in lines] +
+                                [gp.LyricLine(1, "") for _ in range(5 - len(lines))])
+        texts += [t for _, t in lines]
+    from arpeggio.export.lyrics import gp_encoding
+
     path = Path(path)
-    gp.write(song, str(path), version=(5, 1, 0))
+    enc = gp_encoding(texts, encoding)
+    try:
+        gp.write(song, str(path), version=(5, 1, 0), encoding=enc)
+    except UnicodeEncodeError as e:
+        from arpeggio.artifacts import ArpeggioError
+
+        raise ArpeggioError(f"GP5 text cannot be written as {enc} ({e.object[e.start:e.end]!r}): use "
+                            "--gp5-encoding auto (or a code page with these letters, e.g. cp1251 for "
+                            "Cyrillic), or export --no-lyrics") from e
     return path
 
 
@@ -149,13 +181,60 @@ def _has_chord_v1(events, m, e) -> bool:
     return any(x.chord == e.chord and x.onset == e.onset for x in events[1].get(m, []))
 
 
-def read_back(path: str | Path) -> dict:
+def _rhythm_arrangement(arr: Arrangement) -> Arrangement:
+    """One note per sung word (G4 on string 1), lasting until the next word or 2 beats."""
+    from arpeggio.arrangement.tablature import measure_quarters
+    from arpeggio.schema import ArrNote
+
+    mlen = measure_quarters(arr.time_signature)
+    ws = sorted(arr.lyrics, key=lambda w: (w.measure, w.beat))
+    notes = []
+    for i, w in enumerate(ws):
+        beat = round(w.beat * 4) / 4  # sixteenth grid
+        t = (w.measure - 1) * mlen + beat
+        if notes and t <= (notes[-1].measure - 1) * mlen + notes[-1].beat:
+            continue  # two words on one sixteenth: place() joins them on the earlier note
+        nxt = ws[i + 1] if i + 1 < len(ws) else None
+        tn = ((nxt.measure - 1) * mlen + round(nxt.beat * 4) / 4) if nxt else t + 2
+        m = int(t // mlen) + 1
+        notes.append(ArrNote(pitch="G4", measure=m, beat=t - (m - 1) * mlen, duration=max(0.25, min(2.0, tn - t)),
+                             role="melody", voice=1, string=1, fret=3))
+    return arr.model_copy(update={"notes": notes, "chords": []})
+
+
+def _lyrics_track(song, arr: Arrangement, fb) -> "gp.Track":
+    sub = _rhythm_arrangement(arr)
+    _, events = build_events(sub)
+    strings = [gp.GuitarString(number=s, value=fb.string_pitch(s)) for s in range(1, fb.n_strings + 1)]
+    track = gp.Track(song, number=len(song.tracks) + 1, name="Lyrics", strings=strings,
+                     channel=gp.MidiChannel(channel=2, effectChannel=3, instrument=54, volume=0))
+    track.measures = [gp.Measure(track, h) for h in song.measureHeaders]
+    for mi, measure in enumerate(track.measures):
+        voice = measure.voices[0]
+        for e in events[1].get(mi + 1, []):
+            dur = gp.Duration(value=e.value, isDotted=e.dotted,
+                              tuplet=gp.Tuplet(enters=3, times=2) if e.triplet else gp.Tuplet())
+            beat = gp.Beat(voice, duration=dur, status=gp.BeatStatus.normal if e.notes else gp.BeatStatus.rest)
+            if e.notes:
+                tie = any(r.tie_from_prev for r in e.notes)
+                beat.notes.append(gp.Note(beat, value=3, string=1, velocity=gp.Velocities.pianoPianissimo,
+                                          type=gp.NoteType.tie if tie else gp.NoteType.dead))
+            voice.beats.append(beat)
+    return track
+
+
+def read_back(path: str | Path, encoding: str = "cp1252") -> dict:
     """Parse a GP file and return a light summary (used to verify exports)."""
-    song = gp.parse(str(path))
+    song = gp.parse(str(path), encoding=encoding)
     t = song.tracks[0]
     notes = sum(len(b.notes) for m in t.measures for v in m.voices for b in v.beats)
-    return {"title": song.title, "tempo": song.tempo, "measures": len(t.measures), "notes": notes,
-            "tuning": [str(s) for s in t.strings], "capo": t.offset}
+    out = {"title": song.title, "tempo": song.tempo, "measures": len(t.measures), "notes": notes,
+           "tuning": [str(s) for s in t.strings], "capo": t.offset}
+    line = song.lyrics.lines[0] if song.lyrics and song.lyrics.lines else None
+    if line is not None and line.lyrics:
+        out["lyrics"] = {"start_measure": line.startingMeasure, "words": len(line.lyrics.split()),
+                         "encoding": encoding}
+    return out
 
 
 __all__ = ["export_gp5", "read_back", "name_to_midi"]

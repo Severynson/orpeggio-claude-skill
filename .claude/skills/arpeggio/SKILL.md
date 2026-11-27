@@ -86,15 +86,31 @@ priorities and playability rules. Outline:
    hammer-ons/pull-offs with reasons and confidence. Review them, apply with
    `--apply safe` (or edit `tech=` in ATF), then validate again. Low-confidence
    suggestions usually mean "nice, but simplify the accompaniment first".
-8. **Review** — `render-tab arrangement.json --measures 1-8` and read it as a
+8. **Lyrics** (default for songs with vocals; skip when the user asks for a
+   version without lyrics) — timed words go under the tab in every format.
+   - If the user gave the lyrics (in the prompt or a file), **always use them**:
+     save them verbatim to `$W/user_lyrics.txt` (section headers like
+     `[Chorus]` and lyrics-site junk such as "You might also like …" are
+     stripped automatically) and run `sync-lyrics song.mp3 --text
+     $W/user_lyrics.txt [--transcript $W/lyrics.json]`. The user's words are
+     trusted; ElevenLabs only supplies timing.
+   - Otherwise `sync-lyrics song.mp3 --language <code>` (ElevenLabs transcript;
+     tell the user the words may contain mistakes and offer to use their text).
+   - Then `attach-lyrics arrangement.json $W/lyrics_synced.json --score
+     $W/score.json --bar-offset N` and check `by_measure`: do verses/choruses land
+     in the right sections? `export-text` shows a `# lyrics:` comment per bar.
+9. **Review** — `render-tab arrangement.json --measures 1-8` and read it as a
    guitarist: is the melody audible and recognisable, are shapes idiomatic?
-9. **Export** — `$ARP export arrangement.json --format gp5,pdf,musicxml,midi,ascii`.
+10. **Export** — `$ARP export arrangement.json --format gp5,pdf,musicxml,midi,ascii`
+   (lyrics included when attached; `--no-lyrics` for a version without them).
    Report file paths, key/capo/tuning, difficulty, and any compromises you made.
+   For non-Latin lyrics tell the user the GP5 code page from the result
+   (`gp5_encoding_note`).
 
 ## Other workflows (see `references/workflows.md`)
 
-- **Chords above lyrics**: `transcribe-lyrics` (or `align-lyrics` if the user gave
-  the words) + `detect-chords` → `align-chords-lyrics` → review → `export-chord-sheet`.
+- **Chords above lyrics**: `sync-lyrics` (with `--text` if the user gave the
+  words) + `detect-chords` → `align-chords-lyrics` → review → `export-chord-sheet`.
   Details: `references/chord-sheets.md`.
 - **Correct an existing chord sheet**: `parse-chord-sheet` + `detect-chords` +
   `analyze-harmony` (+ `align-lyrics`) → compare evidence → corrected sheet with
